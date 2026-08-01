@@ -39,13 +39,20 @@ replace_once(
 )
 
 # Inferno's ROM submodules are firmware build inputs for many unrelated QEMU
-# targets. The Apple ARM emulator build only needs the mlib helper.
+# targets. The Apple ARM emulator build only needs the mlib helper. Inferno also
+# hardcodes data encryption on, while its simulated SEP explicitly requires it
+# off. Disable that single source configuration before compilation.
 replace_once(
     "  git clone --depth 1 --recurse-submodules --shallow-submodules \\\n"
     "    https://github.com/ChefKissInc/Inferno.git \"$INFERNO_SRC\"",
     "  git clone --depth 1 https://github.com/ChefKissInc/Inferno.git \"$INFERNO_SRC\"\n"
-    "  git -C \"$INFERNO_SRC\" submodule update --init --depth 1 util/mlib",
-    "minimal Inferno clone",
+    "  git -C \"$INFERNO_SRC\" submodule update --init --depth 1 util/mlib\n"
+    "  SEP_BOOT_HEADER=\"$INFERNO_SRC/include/hw/arm/apple-silicon/boot.h\"\n"
+    "  grep -q '^#define ENABLE_DATA_ENCRYPTION$' \"$SEP_BOOT_HEADER\" || fail 'Inferno data-encryption define was not found'\n"
+    "  sed -i.bak 's/^#define ENABLE_DATA_ENCRYPTION$/\\/\\/ #define ENABLE_DATA_ENCRYPTION/' \"$SEP_BOOT_HEADER\"\n"
+    "  rm -f \"$SEP_BOOT_HEADER.bak\"\n"
+    "  if grep -q '^#define ENABLE_DATA_ENCRYPTION$' \"$SEP_BOOT_HEADER\"; then fail 'Could not enable Inferno simulated SEP'; fi",
+    "minimal Inferno clone and simulated SEP configuration",
 )
 
 # Inferno intentionally leaves the macOS executable unsigned and gives it an
