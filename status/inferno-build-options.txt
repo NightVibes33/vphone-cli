@@ -1,3 +1,38 @@
 # ENABLE_DATA_ENCRYPTION references
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-19-
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-20-#ifndef HW_ARM_APPLE_SILICON_BOOT_H
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-21-#define HW_ARM_APPLE_SILICON_BOOT_H
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-22-
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-23-// #define ENABLE_BASEBAND
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h:24:#define ENABLE_DATA_ENCRYPTION
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-25-
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-26-#include "qemu/osdep.h"
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-27-#include "exec/hwaddr.h"
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-28-#include "exec/vaddr.h"
+/home/runner/work/_temp/Inferno/include/hw/arm/apple-silicon/boot.h-29-#include "hw/arm/apple-silicon/dt.h"
+--
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-200-    "wlan\0$",
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-201-    "pmp\0$",
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-202-};
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-203-
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-204-static const char *REM_PROPS[] = {
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c:205:#ifndef ENABLE_DATA_ENCRYPTION
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-206-    "content-protect",
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-207-    "encryptable",
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-208-#endif
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-209-    "function-dock_parent",
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/boot.c-210-    "function-error_handler",
+--
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2970-    t8030_create_spi(t8030, 3);
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2971-
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2972-    if (t8030->sep_rom_filename && t8030->sep_fw_filename) {
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2973-        t8030_create_sep(t8030);
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2974-    } else {
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c:2975:#ifdef ENABLE_DATA_ENCRYPTION
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2976-        error_setg(&error_fatal, "Simulated SEP cannot be used with data "
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2977-                                 "encryption at the moment.");
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2978-        return;
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2979-#else
+/home/runner/work/_temp/Inferno/hw/arm/apple-silicon/t8030.c-2980-        t8030_create_sep_sim(t8030);
 
 # Configure help matches
