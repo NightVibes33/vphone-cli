@@ -53,6 +53,15 @@ extract_uuid() {
   grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n1
 }
 
+publish_early_outputs() {
+  [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
+  {
+    echo "instance_id=$INSTANCE_ID"
+    echo "instance_name=$INSTANCE_NAME"
+    echo "created_instance=$CREATED_INSTANCE"
+  } >> "$GITHUB_OUTPUT"
+}
+
 command -v corellium >/dev/null || fail 'Corellium CLI is not installed.'
 command -v curl >/dev/null || fail 'curl is not installed.'
 command -v jq >/dev/null || fail 'jq is not installed.'
@@ -87,6 +96,10 @@ if [[ -z "$INSTANCE_ID" ]]; then
 else
   echo "Reusing Corellium instance: $INSTANCE_ID"
 fi
+
+# Publish the ID immediately. The workflow can still stop/delete the instance
+# if a later boot or jailbreak verification step fails.
+publish_early_outputs
 
 api_get "/v1/instances/$INSTANCE_ID" > "$INSTANCE_JSON" || fail 'Corellium instance was not found.'
 
@@ -162,7 +175,6 @@ if grep -Eiq \
   JAILBREAK_VERIFIED=1
 fi
 
-# CLI agent access is also expected to succeed on a healthy jailbroken iOS VM.
 if (( JAILBREAK_VERIFIED == 0 )) && (( APPS_RC == 0 && FILES_RC == 0 )); then
   PATCH_TEXT="$(jq -c '.patches // .patch // empty' "$INSTANCE_JSON" 2>/dev/null || true)"
   if [[ -n "$PATCH_TEXT" ]] && grep -qi 'jail' <<<"$PATCH_TEXT"; then
@@ -172,7 +184,7 @@ fi
 
 (( JAILBREAK_VERIFIED == 1 )) || fail 'The VM booted, but jailbroken/root evidence could not be verified.'
 
-INSTANCE_WEB_URL="$(jq -r '.webUrl // .webURL // .url // empty' "$INSTANCE_JSON")"
+INSTANCE_WEB_URL="$(jq -r '.webUrl // .webURL // empty' "$INSTANCE_JSON")"
 if [[ -z "$INSTANCE_WEB_URL" || "$INSTANCE_WEB_URL" == "null" ]]; then
   INSTANCE_WEB_URL="$CORELLIUM_UI_ENDPOINT"
 fi
@@ -188,10 +200,7 @@ fi
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
-    echo "instance_id=$INSTANCE_ID"
-    echo "instance_name=$INSTANCE_NAME"
     echo "instance_web_url=$INSTANCE_WEB_URL"
-    echo "created_instance=$CREATED_INSTANCE"
     echo 'jailbreak_verified=true'
   } >> "$GITHUB_OUTPUT"
 fi
