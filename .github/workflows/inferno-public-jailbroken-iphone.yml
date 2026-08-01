@@ -45,22 +45,51 @@ jobs:
           echo "KEEP_ALIVE_MINUTES=${REQUESTED_KEEP_ALIVE:-45}" >> "$GITHUB_ENV"
           echo "INFERNO_WORK_DIR=$RUNNER_TEMP/inferno-public-iphone" >> "$GITHUB_ENV"
 
-      - name: Reclaim runner disk space
+      - name: Reclaim runner disk space without deleting the macOS SDK
         shell: bash
         run: |
           set -euo pipefail
+          echo 'Before cleanup:'
           df -h
+
+          ACTIVE_DEVELOPER_DIR="$(xcode-select -p)"
+          ACTIVE_XCODE="${ACTIVE_DEVELOPER_DIR%/Contents/Developer}"
+          echo "Active developer directory: $ACTIVE_DEVELOPER_DIR"
+
           sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
-          sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Caches/* 2>/dev/null || true
+          rm -rf "$HOME/Library/Developer/CoreSimulator" 2>/dev/null || true
           rm -rf "$HOME/Library/Developer/Xcode/DerivedData" 2>/dev/null || true
+          rm -rf "$HOME/Library/Android" "$HOME/.android" 2>/dev/null || true
+
+          if [ -d "$ACTIVE_XCODE/Contents/Developer/Platforms" ]; then
+            for platform in \
+              iPhoneOS iPhoneSimulator AppleTVOS AppleTVSimulator \
+              WatchOS WatchSimulator XROS XRSimulator; do
+              sudo rm -rf \
+                "$ACTIVE_XCODE/Contents/Developer/Platforms/${platform}.platform" \
+                2>/dev/null || true
+            done
+          fi
+
+          find /Applications -maxdepth 1 -type d -name 'Xcode*.app' \
+            ! -path "$ACTIVE_XCODE" -print0 2>/dev/null |
+            while IFS= read -r -d '' old_xcode; do
+              sudo rm -rf "$old_xcode" || true
+            done
+
           brew cleanup --prune=all >/dev/null 2>&1 || true
+          echo 'After cleanup:'
           df -h
+          xcrun --sdk macosx --show-sdk-path
+          clang --version
 
       - name: Install public build and remote-view dependencies
         shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
         run: |
           set -euo pipefail
-          brew update
           brew install \
             libtool meson ninja pkgconf dtc glib gnutls jpeg-turbo libpng \
             libslirp libssh libusb lzo ncurses nettle pixman snappy vde zstd \
