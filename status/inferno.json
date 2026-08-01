@@ -1,0 +1,7 @@
+{
+  "state": "waiting-for-run",
+  "stage": "workflow-triggered",
+  "updated_at": "2026-08-01T19:32:40Z",
+  "head_sha": "70363c3f1f0f4ee5c4a3c593120ce276c17a9731",
+  "message": "Waiting for the public Inferno workflow to report progress."
+}
