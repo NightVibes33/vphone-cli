@@ -196,8 +196,8 @@ USBMUXD_COMMIT="$(git rev-list -n 1 --before='2022-03-10 00:00:00 UTC' HEAD)"
 [ -n "$USBMUXD_COMMIT" ] && git checkout "$USBMUXD_COMMIT"
 git apply --3way "$HOST_SHARE/usbmuxd.patch" || true
 
-# libplist renamed its file helpers and added format/options output arguments.
-# Adapt the historical usbmuxd source instead of downgrading system libraries.
+# libplist renamed its file helpers, changed return conventions, and added
+# format/options output arguments. Convert every historical call explicitly.
 python3 - <<'PY'
 from pathlib import Path
 
@@ -206,14 +206,25 @@ s = p.read_text()
 replacements = {
     'plist_read_from_filename(&config, config_file);':
         'plist_read_from_file(config_file, &config, NULL);',
-    'plist_write_to_filename(config, config_file, PLIST_FORMAT_XML)':
-        'plist_write_to_file(config, config_file, PLIST_FORMAT_XML, PLIST_OPT_NONE)',
+    'int res = plist_write_to_filename(config, config_file, PLIST_FORMAT_XML);':
+        'int res = (plist_write_to_file(config, config_file, PLIST_FORMAT_XML, 0) == PLIST_ERR_SUCCESS);',
+    'if (plist_read_from_filename(&config, config_file)) {':
+        'if (plist_read_from_file(config_file, &config, NULL) == PLIST_ERR_SUCCESS) {',
+    'if (!plist_write_to_filename(plist, device_record_file, PLIST_FORMAT_XML)) {':
+        'if (plist_write_to_file(plist, device_record_file, PLIST_FORMAT_XML, 0) != PLIST_ERR_SUCCESS) {',
 }
 for old, new in replacements.items():
-    if old in s:
-        s = s.replace(old, new)
-    elif new not in s:
-        raise SystemExit(f'usbmuxd libplist compatibility call not found: {old}')
+    count = s.count(old)
+    if count == 1:
+        s = s.replace(old, new, 1)
+    elif count == 0 and new in s:
+        pass
+    else:
+        raise SystemExit(f'usbmuxd libplist compatibility call count for {old!r}: {count}')
+
+for token in ('plist_read_from_filename(', 'plist_write_to_filename(', 'PLIST_OPT_NONE'):
+    if token in s:
+        raise SystemExit(f'usbmuxd legacy libplist token remains: {token}')
 p.write_text(s)
 PY
 
