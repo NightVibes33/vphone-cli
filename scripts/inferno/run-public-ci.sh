@@ -77,6 +77,20 @@ new_uefi = '''  QEMU_SHARE="$(brew --prefix qemu)/share/qemu"
   esac'''
 replace_once(old_uefi, new_uefi, "packaged ARM UEFI")
 
+# The companion boots from its virtio disk and never performs PXE. Inferno is
+# copied out of its build tree, so disabling option ROM lookup avoids requiring
+# efi-virtio.rom beside the executable.
+replace_once(
+    '  -device virtio-blk-pci,drive=companion-os \\\n',
+    '  -device virtio-blk-pci,drive=companion-os,romfile= \\\n',
+    "companion block option ROM",
+)
+replace_once(
+    '  -device virtio-net-pci,netdev=companion-net \\\n',
+    '  -device virtio-net-pci,netdev=companion-net,romfile= \\\n',
+    "companion network option ROM",
+)
+
 replace_once(
     "  -display none -nographic \\\n",
     "  -display none \\\n",
