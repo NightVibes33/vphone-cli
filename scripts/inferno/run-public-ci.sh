@@ -23,6 +23,15 @@ def replace_once(old: str, new: str, label: str) -> None:
         raise SystemExit(f"{label}: expected one match, found {count}")
     s = s.replace(old, new, 1)
 
+# The executable copy lives under RUNNER_TEMP, so resolve repository assets from
+# the explicit checkout path rather than from $0.
+replace_once(
+    '''SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"''',
+    'PROJECT_ROOT="${INFERNO_PROJECT_ROOT:?INFERNO_PROJECT_ROOT is required}"',
+    "repository root",
+)
+
 replace_once(
     "python3 -m pip install --user --disable-pip-version-check pyasn1",
     "python3 -m pip install --disable-pip-version-check pyasn1",
@@ -30,8 +39,7 @@ replace_once(
 )
 
 # Inferno's ROM submodules are firmware build inputs for many unrelated QEMU
-# targets. The Apple ARM emulator build only needs the mlib helper. Avoid a
-# recursive checkout of EDK2, OpenSSL, U-Boot, SeaBIOS, and their descendants.
+# targets. The Apple ARM emulator build only needs the mlib helper.
 replace_once(
     "  git clone --depth 1 --recurse-submodules --shallow-submodules \\\n"
     "    https://github.com/ChefKissInc/Inferno.git \"$INFERNO_SRC\"",
@@ -54,7 +62,6 @@ replace_once(
 )
 
 # The Linux companion needs ARM UEFI, not Inferno's huge EDK2 source tree.
-# Homebrew QEMU ships a ready-to-use firmware image.
 old_uefi = '''  UEFI_SOURCE="$(find "$INFERNO_SRC" -type f \\( -name 'edk2-aarch64-code.fd' -o -name 'edk2-aarch64-code.fd.bz2' \\) | head -n1)"
   [ -n "$UEFI_SOURCE" ] || fail 'Inferno build did not provide ARM UEFI firmware'
   case "$UEFI_SOURCE" in
@@ -101,7 +108,6 @@ s = s.replace(
     "printf 'change vnc password %s\\n' \"$VNC_PASSWORD\" | nc -w 2 127.0.0.1 1235",
 )
 
-# Avoid pipefail/SIGPIPE from filtering random bytes through head.
 s = s.replace(
     'VNC_PASSWORD="$(openssl rand -base64 18 | tr -dc \'A-Za-z0-9\' | head -c 12)"',
     'VNC_PASSWORD="$(openssl rand -hex 6)"',
@@ -112,4 +118,5 @@ PY
 
 chmod +x "$PATCHED"
 bash -n "$PATCHED"
+export INFERNO_PROJECT_ROOT="$ROOT"
 exec "$PATCHED"
