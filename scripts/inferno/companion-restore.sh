@@ -62,6 +62,51 @@ cd "$WORK"
 # repositories do not provide the needed development metadata here.
 git clone --depth 1 https://github.com/libimobiledevice/libimobiledevice-glue.git
 cd libimobiledevice-glue
+
+# idevicerestore's 2022 source uses the former COLOR_* spellings. Current glue
+# exposes equivalent FG_* constants. Add compatibility aliases to the public
+# header so every old restore source file sees the same mapping.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path('include/libimobiledevice-glue/termcolors.h')
+s = p.read_text()
+marker = '#ifdef __cplusplus\nextern "C" {\n#endif\n'
+compat = r'''#ifndef COLOR_BLACK
+#define COLOR_BLACK FG_BLACK
+#define COLOR_DARK_GRAY FG_DARK_GRAY
+#define COLOR_RED FG_RED
+#define COLOR_BRIGHT_RED FG_BRIGHT_RED
+#define COLOR_DARK_RED FG_DARK_RED
+#define COLOR_GREEN FG_GREEN
+#define COLOR_BRIGHT_GREEN FG_BRIGHT_GREEN
+#define COLOR_DARK_GREEN FG_DARK_GREEN
+#define COLOR_YELLOW FG_YELLOW
+#define COLOR_BRIGHT_YELLOW FG_BRIGHT_YELLOW
+#define COLOR_DARK_YELLOW FG_DARK_YELLOW
+#define COLOR_BLUE FG_BLUE
+#define COLOR_BRIGHT_BLUE FG_BRIGHT_BLUE
+#define COLOR_DARK_BLUE FG_DARK_BLUE
+#define COLOR_MAGENTA FG_MAGENTA
+#define COLOR_BRIGHT_MAGENTA FG_BRIGHT_MAGENTA
+#define COLOR_DARK_MAGENTA FG_DARK_MAGENTA
+#define COLOR_CYAN FG_CYAN
+#define COLOR_BRIGHT_CYAN FG_BRIGHT_CYAN
+#define COLOR_DARK_CYAN FG_DARK_CYAN
+#define COLOR_LIGHT_GRAY FG_LIGHT_GRAY
+#define COLOR_WHITE FG_WHITE
+#define COLOR_GRAY FG_GRAY
+#define COLOR_DEFAULT FG_DEFAULT
+#endif
+
+'''
+if '#define COLOR_WHITE FG_WHITE' not in s:
+    if marker not in s:
+        raise SystemExit('termcolors compatibility insertion point not found')
+    s = s.replace(marker, compat + marker, 1)
+p.write_text(s)
+PY
+
 ./autogen.sh --prefix=/usr/local
 make -j2
 make install
@@ -121,6 +166,22 @@ if 'Map the emulated DEV board' not in s:
 p.write_text(s)
 PY
 fi
+
+# libplist 2.7 added an optional output-format argument. The old client does
+# not use it, so pass NULL while preserving the original behavior.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path('src/ipsw.c')
+s = p.read_text()
+old = 'plist_from_memory(plist_buf, plist_len, &manifest);'
+new = 'plist_from_memory(plist_buf, plist_len, &manifest, NULL);'
+if old in s:
+    s = s.replace(old, new, 1)
+elif new not in s:
+    raise SystemExit('plist_from_memory compatibility call was not found')
+p.write_text(s)
+PY
 
 ./autogen.sh --prefix=/usr/local
 make -j2
