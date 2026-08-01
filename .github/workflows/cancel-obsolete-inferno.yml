@@ -14,12 +14,20 @@ jobs:
   cancel:
     runs-on: ubuntu-latest
     steps:
-      - name: Cancel obsolete source-build-only run
+      - uses: actions/checkout@v4
+
+      - name: Cancel requested obsolete run
         env:
           GH_TOKEN: ${{ github.token }}
-          OBSOLETE_RUN_ID: '30716378068'
         run: |
           set -euo pipefail
+          OBSOLETE_RUN_ID="$(awk -F= '$1 == "obsolete_run_id" {print $2; exit}' \
+            .github/cancel-obsolete-inferno-request)"
+          [[ "$OBSOLETE_RUN_ID" =~ ^[0-9]+$ ]] || {
+            echo 'Invalid or missing obsolete_run_id.' >&2
+            exit 1
+          }
+
           response="$(gh api --method POST \
             -H 'Accept: application/vnd.github+json' \
             "repos/$GITHUB_REPOSITORY/actions/runs/$OBSOLETE_RUN_ID/cancel" \
