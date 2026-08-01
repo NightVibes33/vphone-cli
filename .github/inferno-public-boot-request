@@ -1,5 +1,5 @@
-requested_at=2026-08-01T21:00:00Z
-nonce=branding-bundled-07
+requested_at=2026-08-01T21:08:00Z
+nonce=branding-and-keymaps-bundled-08
 workflow=inferno-public-jailbroken-iphone
 hardware=iPhone11-T8030
 ios=14.0-beta-5
@@ -17,4 +17,5 @@ t8030_boot_mode=enter_recovery
 sep=simulated
 data_encryption=disabled-at-build
 branding_asset=bundled
+vnc_keymaps=bundled
 keep_alive_minutes=60
