@@ -107,6 +107,30 @@ replace_once(
     "companion network option ROM",
 )
 
+# The ARM companion used to compile its entire restore stack while the iPhone
+# was already booting. Under full TCG that starved USB control transfers and
+# caused Linux descriptor timeouts. Wait for its explicit ready marker before
+# launching the iPhone VM.
+replace_once(
+    "[ -S /tmp/usbqemu ] || fail 'Linux companion did not create /tmp/usbqemu'\n\nIOS_COMMON_DRIVES=(",
+    """[ -S /tmp/usbqemu ] || fail 'Linux companion did not create /tmp/usbqemu'
+
+TOOLS_DEADLINE=$(( $(date +%s) + 1800 ))
+while (( $(date +%s) < TOOLS_DEADLINE )); do
+  kill -0 "$COMPANION_PID" 2>/dev/null || fail 'Linux USB companion exited while building restore tools'
+  [ -f "$SHARE/restore.failed" ] && fail 'Linux companion failed while building restore tools'
+  [ -f "$SHARE/restore-tools.ready" ] && break
+  echo "$(date -u +%FT%TZ) waiting for ARM restore tools before iPhone boot"
+  sleep 10
+done
+[ -f "$SHARE/restore-tools.ready" ] || fail 'Timed out waiting for ARM restore tools'
+
+echo "$(date -u +%FT%TZ) restore tools ready; launching iPhone recovery environment"
+
+IOS_COMMON_DRIVES=(""",
+    "companion restore-tool readiness",
+)
+
 # usb-tcp-remote reports this as its default path. Use the actual upstream
 # default consistently instead of waiting on the obsolete qemu-t8030 path.
 socket_refs = s.count('/tmp/usbqemu')
