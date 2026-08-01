@@ -97,16 +97,15 @@ replace_once(
     "companion network option ROM",
 )
 
-# Follow Inferno's documented companion configuration: USB 2 EHCI with an
-# explicit loopback TCP transport. This avoids the xHCI descriptor timeout seen
-# with the default UNIX-socket setup under full TCG.
+# The explicit TCP transport connected correctly, while Inferno's EHCI model
+# triggered a re-entrant MMIO abort in the Linux companion kernel. Retain TCP
+# and use the stable xHCI controller to isolate transport from controller bugs.
 replace_once(
     '''  -device qemu-xhci,id=xhci \\
   -device usb-tcp-remote,bus=xhci.0 \\''',
-    '''  -usb \\
-  -device usb-ehci,id=ehci \\
-  -device usb-tcp-remote,bus=ehci.0,conn-type=ipv4,conn-addr=127.0.0.1,conn-port=8030 \\''',
-    "documented EHCI TCP companion transport",
+    '''  -device qemu-xhci,id=xhci \\
+  -device usb-tcp-remote,bus=xhci.0,conn-type=ipv4,conn-addr=127.0.0.1,conn-port=8030 \\''',
+    "xHCI TCP companion transport",
 )
 
 # Wait for the companion's full restore stack, not a transport socket, before
@@ -133,7 +132,7 @@ while (( $(date +%s) < TOOLS_DEADLINE )); do
 done
 [ -f "$SHARE/restore-tools.ready" ] || fail 'Timed out waiting for ARM restore tools'
 
-echo "$(date -u +%FT%TZ) restore tools ready; launching iPhone recovery environment over EHCI/TCP"
+echo "$(date -u +%FT%TZ) restore tools ready; launching iPhone recovery environment over xHCI/TCP"
 
 IOS_COMMON_DRIVES=(''',
     "companion restore-tool readiness",
