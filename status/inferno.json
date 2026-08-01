@@ -1,12 +1,12 @@
 {
   "state": "running",
-  "stage": "dependencies-ready",
-  "updated_at": "2026-08-01T21:47:12Z",
+  "stage": "boot-pipeline",
+  "updated_at": "2026-08-01T21:47:15Z",
   "repository": "NightVibes33/vphone-cli",
   "run_id": "30719838023",
   "run_attempt": "1",
   "head_sha": "461893fdea182779c929ec99736fc216426a2fea",
   "runner": "GitHub Actions 1000011489",
-  "message": "Homebrew dependencies and the private Python environment are installed.",
+  "message": "Building Inferno, downloading the Apple IPSW, restoring iOS, and installing the jailbreak bootstrap.",
   "details": ""
 }
