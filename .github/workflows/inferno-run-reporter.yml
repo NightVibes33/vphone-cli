@@ -3,7 +3,7 @@ name: Record Inferno Boot Result
 on:
   workflow_run:
     workflows:
-      - Free Public Jailbroken iPhone (Inferno)
+      - Public Jailbroken iPhone (Inferno)
     types:
       - requested
       - in_progress
@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           mkdir -p status
           cat > status/inferno-latest.txt <<EOF
-          workflow=Free Public Jailbroken iPhone (Inferno)
+          workflow=Public Jailbroken iPhone (Inferno)
           event_action=$EVENT_ACTION
           run_id=$RUN_ID
           run_number=$RUN_NUMBER
