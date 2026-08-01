@@ -1,0 +1,28 @@
+name: Cancel Obsolete Inferno Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/cancel-obsolete-inferno-request
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel obsolete source-build-only run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OBSOLETE_RUN_ID: '30716378068'
+        run: |
+          set -euo pipefail
+          response="$(gh api --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$OBSOLETE_RUN_ID/cancel" \
+            2>&1 || true)"
+          printf '%s\n' "$response"
+          echo "Cancellation requested for run $OBSOLETE_RUN_ID."
