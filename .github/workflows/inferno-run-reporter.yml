@@ -1,0 +1,59 @@
+name: Record Inferno Boot Result
+
+on:
+  workflow_run:
+    workflows:
+      - Free Public Jailbroken iPhone (Inferno)
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Record completed boot attempt
+        shell: bash
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+          RUN_UPDATED_AT: ${{ github.event.workflow_run.updated_at }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p status
+          cat > status/inferno-latest.txt <<EOF
+          workflow=Free Public Jailbroken iPhone (Inferno)
+          run_id=$RUN_ID
+          run_number=$RUN_NUMBER
+          run_attempt=$RUN_ATTEMPT
+          event=$RUN_EVENT
+          conclusion=$RUN_CONCLUSION
+          created_at=$RUN_CREATED_AT
+          updated_at=$RUN_UPDATED_AT
+          head_sha=$HEAD_SHA
+          url=$RUN_URL
+          EOF
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add status/inferno-latest.txt
+          git commit -m "Record Inferno boot run $RUN_ID ($RUN_CONCLUSION)" || exit 0
+
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin main
+            git push origin HEAD:main && exit 0
+            sleep $((attempt * 2))
+          done
+          exit 1
