@@ -14,7 +14,6 @@ on:
   push:
     branches: [main]
     paths:
-      - .github/workflows/inferno-public-jailbroken-iphone.yml
       - .github/inferno-public-boot-request
 
 permissions:
@@ -22,7 +21,7 @@ permissions:
 
 concurrency:
   group: inferno-public-jailbroken-iphone
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   boot:
@@ -72,7 +71,7 @@ jobs:
           brew install \
             libtool meson ninja pkgconf dtc glib gnutls jpeg-turbo libpng \
             libslirp libssh libusb lzo ncurses nettle pixman snappy vde zstd \
-            lzfse cdrtools jq sshpass cloudflared python@3.13 openssl@3
+            lzfse cdrtools jq sshpass cloudflared python@3.13 openssl@3 qemu
 
           PYTHON_BIN="$(brew --prefix python@3.13)/bin/python3.13"
           "$PYTHON_BIN" -m venv "$RUNNER_TEMP/inferno-python"
