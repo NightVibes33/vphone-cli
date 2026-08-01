@@ -41,18 +41,24 @@ replace_once(
 # Inferno's ROM submodules are firmware build inputs for many unrelated QEMU
 # targets. The Apple ARM emulator build only needs the mlib helper. Inferno also
 # hardcodes data encryption on, while its simulated SEP explicitly requires it
-# off. Disable that single source configuration before compilation.
+# off. Disable that single source configuration before compilation. Preserve
+# the mandatory public branding image in the runtime icon directory before the
+# source tree is removed.
 replace_once(
     "  git clone --depth 1 --recurse-submodules --shallow-submodules \\\n"
     "    https://github.com/ChefKissInc/Inferno.git \"$INFERNO_SRC\"",
     "  git clone --depth 1 https://github.com/ChefKissInc/Inferno.git \"$INFERNO_SRC\"\n"
     "  git -C \"$INFERNO_SRC\" submodule update --init --depth 1 util/mlib\n"
+    "  BRANDING_DIR=\"$SHARE/icons/hicolor/512x512/apps\"\n"
+    "  mkdir -p \"$BRANDING_DIR\"\n"
+    "  cp \"$INFERNO_SRC/ui/icons/CKQEMUBootSplash_512x512@2x.png\" \"$BRANDING_DIR/CKQEMUBootSplash@2x.png\"\n"
+    "  test -s \"$BRANDING_DIR/CKQEMUBootSplash@2x.png\" || fail 'Inferno branding image was not bundled'\n"
     "  SEP_BOOT_HEADER=\"$INFERNO_SRC/include/hw/arm/apple-silicon/boot.h\"\n"
     "  grep -q '^#define ENABLE_DATA_ENCRYPTION$' \"$SEP_BOOT_HEADER\" || fail 'Inferno data-encryption define was not found'\n"
     "  sed -i.bak 's/^#define ENABLE_DATA_ENCRYPTION$/\\/\\/ #define ENABLE_DATA_ENCRYPTION/' \"$SEP_BOOT_HEADER\"\n"
     "  rm -f \"$SEP_BOOT_HEADER.bak\"\n"
     "  if grep -q '^#define ENABLE_DATA_ENCRYPTION$' \"$SEP_BOOT_HEADER\"; then fail 'Could not enable Inferno simulated SEP'; fi",
-    "minimal Inferno clone and simulated SEP configuration",
+    "minimal Inferno clone, simulated SEP, and branding asset",
 )
 
 # Inferno intentionally leaves the macOS executable unsigned and gives it an
