@@ -5,6 +5,8 @@ on:
     workflows:
       - Free Public Jailbroken iPhone (Inferno)
     types:
+      - requested
+      - in_progress
       - completed
 
 permissions:
@@ -18,12 +20,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Record completed boot attempt
+      - name: Record boot attempt state
         shell: bash
         env:
+          EVENT_ACTION: ${{ github.event.action }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_STATUS: ${{ github.event.workflow_run.status }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
@@ -35,11 +39,13 @@ jobs:
           mkdir -p status
           cat > status/inferno-latest.txt <<EOF
           workflow=Free Public Jailbroken iPhone (Inferno)
+          event_action=$EVENT_ACTION
           run_id=$RUN_ID
           run_number=$RUN_NUMBER
           run_attempt=$RUN_ATTEMPT
-          event=$RUN_EVENT
-          conclusion=$RUN_CONCLUSION
+          trigger_event=$RUN_EVENT
+          status=$RUN_STATUS
+          conclusion=${RUN_CONCLUSION:-pending}
           created_at=$RUN_CREATED_AT
           updated_at=$RUN_UPDATED_AT
           head_sha=$HEAD_SHA
@@ -49,7 +55,7 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add status/inferno-latest.txt
-          git commit -m "Record Inferno boot run $RUN_ID ($RUN_CONCLUSION)" || exit 0
+          git commit -m "Record Inferno run $RUN_ID ($EVENT_ACTION)" || exit 0
 
           for attempt in 1 2 3 4 5; do
             git pull --rebase origin main
