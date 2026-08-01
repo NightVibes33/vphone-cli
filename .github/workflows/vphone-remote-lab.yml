@@ -1,93 +1,73 @@
-name: vphone-cli Remote Lab
+name: vphone-cli iPhone Remote Lab
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: What to run
+        description: Real boot requires a physical Apple-silicon self-hosted runner
         required: true
-        default: hosted-capability-probe
+        default: boot-bare-metal
         type: choice
         options:
-          - hosted-capability-probe
           - boot-bare-metal
+          - hosted-capability-probe
       vm_name:
         description: Persistent virtual iPhone name
         required: true
         default: github-phone
         type: string
       variant:
-        description: Firmware patch variant
+        description: Firmware patch variant selected during VM creation
         required: true
         default: jb
         type: choice
         options:
+          - less
           - regular
           - dev
           - jb
           - exp
-      keep_alive_minutes:
-        description: iPhone browser/VNC/SSH access window
+      boot_timeout_seconds:
+        description: Time allowed for the launched iPhone to expose VNC
         required: true
-        default: '300'
+        default: '1800'
+        type: choice
+        options:
+          - '900'
+          - '1800'
+          - '3600'
+      keep_alive_minutes:
+        description: Keep noVNC and native VNC available after verified boot
+        required: true
+        default: '120'
         type: choice
         options:
           - '60'
           - '120'
           - '180'
-          - '300'
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/vphone-remote-lab.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: vphone-remote-lab-${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'hosted-probe' }}
-  cancel-in-progress: true
+  group: vphone-iphone-remote-lab
+  cancel-in-progress: false
 
 jobs:
   hosted-capability-probe:
-    if: github.event_name == 'push' || inputs.mode == 'hosted-capability-probe'
-    name: GitHub-hosted Apple-silicon probe
+    if: inputs.mode == 'hosted-capability-probe'
+    name: Prove GitHub-hosted macOS cannot boot PV=3
     runs-on: macos-26
     timeout-minutes: 120
 
     steps:
-      - name: Check out NightVibes33/vphone-cli
+      - name: Check out repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Record hosted-runner virtualization facts
-        shell: bash
-        run: |
-          set -uo pipefail
-          {
-            echo '# GitHub-hosted vphone capability probe'
-            echo
-            echo "date=$(date -u +%FT%TZ)"
-            echo "repository=$GITHUB_REPOSITORY"
-            echo "commit=$GITHUB_SHA"
-            echo "runner=${RUNNER_NAME:-unknown}"
-            echo "arch=$(uname -m)"
-            echo "macOS=$(sw_vers -productVersion)"
-            echo "hardware=$(sysctl -n hw.model 2>/dev/null || true)"
-            echo "kern.hv_support=$(sysctl -n kern.hv_support 2>/dev/null || echo unavailable)"
-            echo "SIP=$(csrutil status 2>&1 || true)"
-            echo "research_guests=$(csrutil allow-research-guests status 2>&1 || true)"
-          } | tee "$RUNNER_TEMP/host-facts.txt"
-
-          cat > "$RUNNER_TEMP/vz-probe.swift" <<'SWIFT'
-          import Virtualization
-          print("VZVirtualMachine.isSupported=\(VZVirtualMachine.isSupported)")
-          SWIFT
-          swift "$RUNNER_TEMP/vz-probe.swift" 2>&1 | tee -a "$RUNNER_TEMP/host-facts.txt" || true
-
-      - name: Attempt the complete toolchain build
+      - name: Build vphone-cli
         id: build
         continue-on-error: true
         shell: bash
@@ -96,35 +76,24 @@ jobs:
           ./scripts/setup_tools.sh 2>&1 | tee "$RUNNER_TEMP/setup-tools.log"
           setup_rc=${PIPESTATUS[0]}
           if [ "$setup_rc" -ne 0 ]; then
-            echo "setup_tools_exit=$setup_rc" | tee "$RUNNER_TEMP/build-result.txt"
             exit "$setup_rc"
           fi
-
           ./scripts/build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
-          build_rc=${PIPESTATUS[0]}
-          {
-            echo 'setup_tools_exit=0'
-            echo "build_exit=$build_rc"
-          } | tee "$RUNNER_TEMP/build-result.txt"
-          exit "$build_rc"
+          exit ${PIPESTATUS[0]}
 
-      - name: Run the upstream boot preflight
+      - name: Run bootability preflight
         id: preflight
         continue-on-error: true
         shell: bash
         run: |
           set -uo pipefail
           BIN="$GITHUB_WORKSPACE/.build/vphone-cli.app/Contents/MacOS/vphone-cli"
-          if [ ! -x "$BIN" ]; then
-            echo 'vphone-cli binary was not produced; preflight cannot run.' | tee "$RUNNER_TEMP/preflight.log"
-            exit 2
-          fi
-
+          test -x "$BIN" || exit 2
           VPHONE_CLI_BIN="$BIN" ./scripts/boot_host_preflight.sh --assert-bootable \
             2>&1 | tee "$RUNNER_TEMP/preflight.log"
           exit ${PIPESTATUS[0]}
 
-      - name: Explain the hosted-runner result
+      - name: Publish probe result
         if: always()
         shell: bash
         env:
@@ -132,102 +101,111 @@ jobs:
           PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
         run: |
           {
-            echo '## GitHub-hosted vphone result'
+            echo '## Hosted runner diagnostic only'
             echo
-            echo "- Toolchain build: **$BUILD_OUTCOME**"
-            echo "- Boot preflight: **$PREFLIGHT_OUTCOME**"
-            echo '- This job intentionally does not download firmware or attempt a restore.'
-            echo '- A GitHub-hosted macOS runner is itself virtualized, so it cannot provide the non-nested PV=3 host required by vphone-cli.'
-            echo '- Run this workflow again with `boot-bare-metal` after connecting a physical Apple-silicon self-hosted runner labeled `vphone`.'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "- Build: **$BUILD_OUTCOME**"
+            echo "- Bootability preflight: **$PREFLIGHT_OUTCOME**"
+            echo '- No virtual iPhone was created or launched.'
+            echo '- GitHub-hosted macOS is already virtualized, so Apple PV=3 cannot be nested there.'
+            echo '- Select `boot-bare-metal` on an interactive physical Apple-silicon self-hosted runner for a real boot.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload hosted-probe diagnostics
+      - name: Upload probe logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vphone-hosted-probe-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/host-facts.txt
             ${{ runner.temp }}/setup-tools.log
             ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/build-result.txt
             ${{ runner.temp }}/preflight.log
           if-no-files-found: warn
           retention-days: 14
 
   boot-bare-metal:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'boot-bare-metal'
-    name: Boot vphone on physical Apple silicon
+    if: inputs.mode == 'boot-bare-metal'
+    name: Boot and verify virtual iPhone
     runs-on: [self-hosted, macOS, ARM64, vphone]
     timeout-minutes: 360
 
     steps:
-      - name: Check out NightVibes33/vphone-cli
+      - name: Check out repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Validate the physical host and secrets
+      - name: Validate physical interactive Mac host
         shell: bash
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-          VPHONE_VNC_PASSWORD: ${{ secrets.VPHONE_VNC_PASSWORD }}
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
-          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 15
-          test "$(sysctl -n kern.hv_support)" = 1
-          test -n "$TAILSCALE_AUTHKEY"
-          test -n "$VPHONE_VNC_PASSWORD"
-          if [ "${#VPHONE_VNC_PASSWORD}" -ne 8 ]; then
-            echo 'VPHONE_VNC_PASSWORD must contain exactly 8 characters for macOS legacy VNC.'
+
+          [ "$(uname -m)" = arm64 ] || {
+            echo 'This job requires a physical Apple-silicon Mac.' >&2
+            exit 1
+          }
+
+          [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 15 ] || {
+            echo 'This job requires macOS 15 or newer.' >&2
+            exit 1
+          }
+
+          [ "$(sysctl -n kern.hv_support 2>/dev/null || echo 0)" = 1 ] || {
+            echo 'Virtualization.framework is unavailable on this host.' >&2
+            exit 1
+          }
+
+          model="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Model Name/ {print $2; exit}')"
+          nested="$(sysctl -n kern.hv_vmm_present 2>/dev/null || true)"
+          if [ "$nested" = 1 ] || [ "$model" = 'Apple Virtual Machine 1' ]; then
+            echo 'Nested Mac VM detected. vphone PV=3 cannot boot here.' >&2
             exit 1
           fi
-          sudo -n true
+
+          console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+          current_user="$(id -un)"
+          if [ -z "$console_user" ] || [ "$console_user" = root ] || [ "$console_user" != "$current_user" ]; then
+            echo 'Start the runner interactively with ./run.sh from the logged-in Mac desktop account.' >&2
+            echo 'Do not install this vphone runner as a background service.' >&2
+            exit 1
+          fi
+
+          test -n "$TAILSCALE_AUTHKEY" || {
+            echo 'Missing repository secret: TAILSCALE_AUTHKEY' >&2
+            exit 1
+          }
+
+          sudo -n true || {
+            echo 'The dedicated runner account needs passwordless sudo for vphone restore/CFW installation.' >&2
+            exit 1
+          }
+
           command -v brew >/dev/null
           command -v python3 >/dev/null
+
           {
-            echo "host=$(scutil --get ComputerName 2>/dev/null || hostname)"
+            echo "model=$model"
+            echo "console_user=$console_user"
             uname -a
             sw_vers
             csrutil status || true
             csrutil allow-research-guests status || true
+            sysctl -n kern.bootargs 2>/dev/null || true
           } | tee "$RUNNER_TEMP/physical-host.txt"
 
-      - name: Join the physical Mac to Tailscale
+      - name: Join private Tailscale network
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           version: latest
 
-      - name: Enable macOS VNC Screen Sharing
-        shell: bash
-        env:
-          VPHONE_VNC_PASSWORD: ${{ secrets.VPHONE_VNC_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KICKSTART='/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart'
-          test -x "$KICKSTART"
-
-          sudo "$KICKSTART" -activate -configure -access -on -privs -all -restart -agent -menu
-          sudo "$KICKSTART" -configure -clientopts \
-            -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "$VPHONE_VNC_PASSWORD"
-          sudo launchctl enable system/com.apple.screensharing || true
-          sudo launchctl kickstart -k system/com.apple.screensharing || true
-
-          TS_IP="$(tailscale ip -4 | head -n1)"
-          test -n "$TS_IP"
-          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
-          echo "Mac desktop VNC: vnc://$TS_IP:5900" | tee "$RUNNER_TEMP/remote-addresses.txt"
-
-      - name: Install forwarding and iPhone browser-view utilities
+      - name: Install remote-view utilities
         shell: bash
         run: |
           set -euo pipefail
           brew list socat >/dev/null 2>&1 || brew install socat
-          brew list jq >/dev/null 2>&1 || brew install jq
 
           NOVNC_ROOT="$RUNNER_TEMP/noVNC"
           NOVNC_VENV="$RUNNER_TEMP/novnc-venv"
@@ -235,190 +213,166 @@ jobs:
           git clone --depth 1 https://github.com/novnc/noVNC.git "$NOVNC_ROOT"
           python3 -m venv "$NOVNC_VENV"
           "$NOVNC_VENV/bin/python" -m pip install --upgrade pip websockify
+
           echo "NOVNC_ROOT=$NOVNC_ROOT" >> "$GITHUB_ENV"
           echo "NOVNC_VENV=$NOVNC_VENV" >> "$GITHUB_ENV"
 
-      - name: Build and bundle vphone-cli
+      - name: Build and sign vphone-cli
         shell: bash
         run: |
           set -euo pipefail
           ./scripts/setup_tools.sh 2>&1 | tee "$RUNNER_TEMP/setup-tools.log"
           ./scripts/build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
+
           VPHONE_BIN="$GITHUB_WORKSPACE/.build/vphone-cli.app/Contents/MacOS/vphone-cli"
           test -x "$VPHONE_BIN"
+          chmod +x "$GITHUB_WORKSPACE/scripts/github_boot_vphone.zsh"
           echo "VPHONE_BIN=$VPHONE_BIN" >> "$GITHUB_ENV"
-          "$VPHONE_BIN" --help | head -n 60
 
-      - name: Prove the host is bootable before firmware work
-        shell: bash
-        run: |
-          set -euo pipefail
-          VPHONE_CLI_BIN="$VPHONE_BIN" ./scripts/boot_host_preflight.sh --assert-bootable \
-            2>&1 | tee "$RUNNER_TEMP/preflight.log"
-
-      - name: Create or reuse the persistent virtual iPhone
-        shell: bash
+      - name: Create, launch, and verify iPhone boot
+        id: boot
+        shell: zsh
         env:
           VM_NAME: ${{ inputs.vm_name }}
           VARIANT: ${{ inputs.variant }}
+          VPHONE_BOOT_TIMEOUT_SECONDS: ${{ inputs.boot_timeout_seconds }}
         run: |
           set -euo pipefail
-          if "$VPHONE_BIN" vm info "$VM_NAME" --json >/dev/null 2>&1; then
-            echo "Reusing $VM_NAME from $HOME/.vphone/VMs"
-          else
-            sudo -v
-            while sleep 45; do sudo -n true || exit; done &
-            SUDO_KEEPALIVE_PID=$!
-            trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
-            "$VPHONE_BIN" vm create "$VM_NAME" -V "$VARIANT" --keep-artifacts -vv \
-              2>&1 | tee "$RUNNER_TEMP/vm-create.log"
-          fi
-          "$VPHONE_BIN" vm info "$VM_NAME" --json | tee "$RUNNER_TEMP/vm-info.json"
+          BOOT_LOG_DIR="$RUNNER_TEMP/vphone-remote-lab"
+          mkdir -p "$BOOT_LOG_DIR"
 
-      - name: Launch the virtual iPhone
-        shell: bash
-        env:
-          VM_NAME: ${{ inputs.vm_name }}
-          VARIANT: ${{ inputs.variant }}
-        run: |
-          set -euo pipefail
-          "$VPHONE_BIN" vm stop "$VM_NAME" --timeout 5 || true
+          VPHONE_CLI_BIN="$VPHONE_BIN" \
+            "$GITHUB_WORKSPACE/scripts/github_boot_vphone.zsh" \
+            "$VM_NAME" "$VARIANT" "$BOOT_LOG_DIR" \
+            2>&1 | tee "$RUNNER_TEMP/verified-boot.log"
 
-          nohup "$VPHONE_BIN" vm launch "$VM_NAME" -V "$VARIANT" -vv \
-            >"$RUNNER_TEMP/vphone-launch.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/vphone-launch.pid"
-          sleep 20
-          kill -0 "$(cat "$RUNNER_TEMP/vphone-launch.pid")"
-          tail -n 160 "$RUNNER_TEMP/vphone-launch.log" || true
-
-      - name: Discover guest and expose Safari, VNC, and SSH access
-        id: guest-forwarding
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -uo pipefail
-          GUEST_IP=''
-
-          for attempt in $(seq 1 90); do
-            candidates="$({
-              grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$RUNNER_TEMP/vphone-launch.log" 2>/dev/null || true
-              arp -an 2>/dev/null | awk '{gsub(/[()]/, "", $2); if ($2 ~ /^[0-9]+\./) print $2}' || true
-            } | sort -u)"
-
-            for ip in $candidates; do
-              case "$ip" in
-                0.*|127.*|169.254.*|224.*|255.*) continue ;;
-              esac
-              [ "$ip" = "$TS_IP" ] && continue
-              if nc -z -G 1 "$ip" 5901 >/dev/null 2>&1; then
-                GUEST_IP="$ip"
-                break 2
-              fi
-            done
-            sleep 10
-          done
-
+          GUEST_IP="$(cat "$BOOT_LOG_DIR/guest-ip.txt")"
           test -n "$GUEST_IP"
-          echo "GUEST_IP=$GUEST_IP" >> "$GITHUB_ENV"
-          echo "$GUEST_IP" > "$RUNNER_TEMP/guest-ip.txt"
+          nc -z -G 3 "$GUEST_IP" 5901
 
-          nohup socat TCP-LISTEN:5901,reuseaddr,fork TCP:"$GUEST_IP":5901 \
+          echo "guest_ip=$GUEST_IP" >> "$GITHUB_OUTPUT"
+          echo "GUEST_IP=$GUEST_IP" >> "$GITHUB_ENV"
+          echo "VPHONE_LAUNCH_PID_FILE=$BOOT_LOG_DIR/vphone-launch.pid" >> "$GITHUB_ENV"
+
+      - name: Expose noVNC and native VNC to the real iPhone
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TS_IP="$(tailscale ip -4 | head -n1)"
+          test -n "$TS_IP"
+          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
+
+          nohup socat TCP-LISTEN:5901,bind="$TS_IP",reuseaddr,fork TCP:"$GUEST_IP":5901 \
             >"$RUNNER_TEMP/socat-vnc.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/socat-vnc.pid"
 
-          nohup socat TCP-LISTEN:22222,reuseaddr,fork TCP:"$GUEST_IP":22222 \
-            >"$RUNNER_TEMP/socat-ssh.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/socat-ssh.pid"
+          if nc -z -G 2 "$GUEST_IP" 22222 >/dev/null 2>&1; then
+            nohup socat TCP-LISTEN:22222,bind="$TS_IP",reuseaddr,fork TCP:"$GUEST_IP":22222 \
+              >"$RUNNER_TEMP/socat-ssh.log" 2>&1 &
+            echo $! > "$RUNNER_TEMP/socat-ssh.pid"
+            echo 'SSH_AVAILABLE=1' >> "$GITHUB_ENV"
+          else
+            echo 'SSH_AVAILABLE=0' >> "$GITHUB_ENV"
+          fi
 
           nohup "$NOVNC_VENV/bin/websockify" --web "$NOVNC_ROOT" \
-            6080 "$GUEST_IP:5901" >"$RUNNER_TEMP/novnc.log" 2>&1 &
+            "$TS_IP:6080" "$GUEST_IP:5901" \
+            >"$RUNNER_TEMP/novnc.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/novnc.pid"
 
           for attempt in $(seq 1 30); do
-            if nc -z -G 1 127.0.0.1 6080 >/dev/null 2>&1; then
-              break
-            fi
+            nc -z -G 2 "$TS_IP" 5901 >/dev/null 2>&1 && \
+            nc -z -G 2 "$TS_IP" 6080 >/dev/null 2>&1 && break
             sleep 2
           done
-          nc -z -G 2 127.0.0.1 6080
 
-          IPHONE_VIEW_URL="http://$TS_IP:6080/vnc.html?autoconnect=true&resize=scale"
-          echo "IPHONE_VIEW_URL=$IPHONE_VIEW_URL" >> "$GITHUB_ENV"
-          echo "iPhone Safari view: $IPHONE_VIEW_URL" | tee -a "$RUNNER_TEMP/remote-addresses.txt"
-          echo "Direct virtual-iPhone VNC: vnc://$TS_IP:5901" | tee -a "$RUNNER_TEMP/remote-addresses.txt"
-          echo "Virtual-iPhone SSH: ssh -p 22222 mobile@$TS_IP" | tee -a "$RUNNER_TEMP/remote-addresses.txt"
+          nc -z -G 3 "$TS_IP" 5901
+          nc -z -G 3 "$TS_IP" 6080
 
-      - name: Publish iPhone connection details
-        if: always()
+          NOVNC_URL="http://$TS_IP:6080/vnc.html?autoconnect=true&resize=scale"
+          NATIVE_VNC_URL="vnc://$TS_IP:5901"
+          echo "NOVNC_URL=$NOVNC_URL" >> "$GITHUB_ENV"
+          echo "NATIVE_VNC_URL=$NATIVE_VNC_URL" >> "$GITHUB_ENV"
+
+          {
+            echo "noVNC=$NOVNC_URL"
+            echo "VNC=$NATIVE_VNC_URL"
+            echo "guest_ip=$GUEST_IP"
+          } | tee "$RUNNER_TEMP/remote-addresses.txt"
+
+      - name: Publish verified iPhone connections
         shell: bash
         env:
           VM_NAME: ${{ inputs.vm_name }}
           VARIANT: ${{ inputs.variant }}
         run: |
           {
-            echo '## vphone-cli remote lab'
+            echo '## ✅ Virtual iPhone boot verified'
             echo
-            echo "- Repository: \`$GITHUB_REPOSITORY\`"
             echo "- VM: \`$VM_NAME\`"
             echo "- Variant: \`$VARIANT\`"
-            if [ -n "${IPHONE_VIEW_URL:-}" ]; then
-              echo "- **Open on your iPhone in Safari:** [$IPHONE_VIEW_URL]($IPHONE_VIEW_URL)"
-              echo '- Safari shows the virtual iPhone and sends touch input through noVNC.'
-              echo "- Direct VNC app address: \`vnc://$TS_IP:5901\`"
-              echo "- Virtual-iPhone SSH: \`ssh -p 22222 mobile@$TS_IP\`"
-              echo '- Default jailbreak SSH password: `alpine`'
-            else
-              echo "- Mac desktop fallback: \`vnc://$TS_IP:5900\`"
-              echo '- Direct guest discovery did not complete; use the Mac desktop VNC view.'
+            echo "- Guest VNC port: **reachable**"
+            echo "- **noVNC in iPhone Safari:** [$NOVNC_URL]($NOVNC_URL)"
+            echo "- **Native iPhone VNC app:** \`$NATIVE_VNC_URL\`"
+            if [ "${SSH_AVAILABLE:-0}" = 1 ]; then
+              echo "- SSH: \`ssh -p 22222 mobile@$TS_IP\`"
+              echo '- Default jailbreak password: `alpine`'
             fi
-            echo '- Your iPhone must have Tailscale enabled and be signed into the same tailnet.'
-            echo '- The browser address is private to devices allowed by your Tailscale ACLs.'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo
+            echo 'Turn on Tailscale on the real iPhone before opening either address.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep the iPhone-visible lab online
+      - name: Keep verified iPhone session online
         shell: bash
         env:
           KEEP_ALIVE: ${{ inputs.keep_alive_minutes }}
         run: |
           set -euo pipefail
           end=$((SECONDS + KEEP_ALIVE * 60))
+
           while [ "$SECONDS" -lt "$end" ]; do
-            if ! kill -0 "$(cat "$RUNNER_TEMP/vphone-launch.pid")" 2>/dev/null; then
-              echo 'vphone process exited unexpectedly.'
-              tail -n 240 "$RUNNER_TEMP/vphone-launch.log" || true
+            launch_pid="$(cat "$VPHONE_LAUNCH_PID_FILE")"
+            kill -0 "$launch_pid" 2>/dev/null || {
+              echo 'The virtual iPhone process exited.' >&2
+              tail -n 240 "$RUNNER_TEMP/vphone-remote-lab/vphone-launch.log" || true
               exit 1
-            fi
-            if [ -f "$RUNNER_TEMP/novnc.pid" ] && ! kill -0 "$(cat "$RUNNER_TEMP/novnc.pid")" 2>/dev/null; then
-              echo 'noVNC exited unexpectedly.'
-              tail -n 160 "$RUNNER_TEMP/novnc.log" || true
+            }
+
+            nc -z -G 3 "$GUEST_IP" 5901 || {
+              echo 'The virtual iPhone VNC framebuffer stopped responding.' >&2
               exit 1
-            fi
-            echo "$(date -u +%FT%TZ) iPhone view active at ${IPHONE_VIEW_URL:-unavailable}"
+            }
+
+            kill -0 "$(cat "$RUNNER_TEMP/novnc.pid")" 2>/dev/null
+            kill -0 "$(cat "$RUNNER_TEMP/socat-vnc.pid")" 2>/dev/null
+            echo "$(date -u +%FT%TZ) verified iPhone online: $NOVNC_URL | $NATIVE_VNC_URL"
             sleep 60
           done
 
-      - name: Upload remote-lab logs
+      - name: Upload boot evidence and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vphone-remote-lab-${{ github.run_id }}
+          name: vphone-verified-boot-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/physical-host.txt
-            ${{ runner.temp }}/remote-addresses.txt
             ${{ runner.temp }}/setup-tools.log
             ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/preflight.log
-            ${{ runner.temp }}/vm-create.log
-            ${{ runner.temp }}/vm-info.json
-            ${{ runner.temp }}/vphone-launch.log
-            ${{ runner.temp }}/guest-ip.txt
+            ${{ runner.temp }}/verified-boot.log
+            ${{ runner.temp }}/remote-addresses.txt
+            ${{ runner.temp }}/vphone-remote-lab/preflight.log
+            ${{ runner.temp }}/vphone-remote-lab/vm-create.log
+            ${{ runner.temp }}/vphone-remote-lab/vm-info.json
+            ${{ runner.temp }}/vphone-remote-lab/vphone-launch.log
+            ${{ runner.temp }}/vphone-remote-lab/guest-ip.txt
             ${{ runner.temp }}/novnc.log
             ${{ runner.temp }}/socat-vnc.log
             ${{ runner.temp }}/socat-ssh.log
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Stop this remote session
+      - name: Stop remote session
         if: always()
         shell: bash
         env:
