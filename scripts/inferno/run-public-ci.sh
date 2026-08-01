@@ -91,6 +91,13 @@ replace_once(
     "companion network option ROM",
 )
 
+# usb-tcp-remote reports this as its default path. Use the actual upstream
+# default consistently instead of waiting on the obsolete qemu-t8030 path.
+socket_refs = s.count('/tmp/usbqemu')
+if socket_refs < 2:
+    raise SystemExit(f"USB socket path: expected at least two matches, found {socket_refs}")
+s = s.replace('/tmp/usbqemu', '/tmp/InfernoUSBRemote')
+
 replace_once(
     "  -display none -nographic \\\n",
     "  -display none \\\n",
