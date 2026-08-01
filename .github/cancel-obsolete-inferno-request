@@ -1,3 +1,3 @@
-obsolete_run_id=30716378068
-replacement_run_id=30716405090
-requested_at=2026-08-01T20:18:00Z
+obsolete_run_id=30716405090
+reason=predates-libimobiledevice-glue-and-error-trap
+requested_at=2026-08-01T20:24:00Z
