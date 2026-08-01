@@ -1,44 +1,71 @@
-# GitHub Actions remote vphone lab
+# Verified virtual-iPhone remote lab
 
-The workflow at `.github/workflows/vphone-remote-lab.yml` has two modes:
+The workflow at `.github/workflows/vphone-remote-lab.yml` can create, restore, launch, and verify a persistent virtual iPhone. A real boot is considered successful only after the guest answers on its VNC framebuffer port (`5901`). It then publishes both connection choices for a real iPhone:
 
-- `hosted-capability-probe` builds and runs the host preflight on GitHub's Apple-silicon `macos-26` runner. It is diagnostic only because the hosted runner is already a virtual machine.
-- `boot-bare-metal` builds, creates, restores, and launches the virtual iPhone on a physical Apple-silicon Mac registered as a self-hosted GitHub Actions runner.
+1. **noVNC:** open the virtual iPhone in Safari and control it with touch.
+2. **Native VNC:** open the virtual iPhone in an iOS VNC client.
 
-The real mode publishes three private Tailscale connection methods:
+The guest is an iPhone/iOS VM. The workflow does not expose a macOS desktop as the normal interface.
 
-1. An iPhone Safari page powered by noVNC, showing the virtual iPhone and forwarding touch input.
-2. A direct VNC endpoint for a native VNC client.
-3. SSH access to the virtual iPhone when the selected firmware variant provides SSH.
+## Hard requirement
 
-## Required physical host
+A real boot requires a **physical, non-virtual Apple-silicon Mac** running macOS 15 or newer. GitHub-hosted macOS runners are already virtual machines, and Apple's PV=3 virtualization used by vphone cannot be nested inside them.
 
-Use a physical Apple-silicon Mac with:
+The physical Mac also needs:
 
-- macOS 15 or newer;
-- enough free storage for the source tree, IPSWs, restore artifacts, and a 64 GB sparse virtual disk;
-- the SIP/research-guest/AMFI preparation documented in the main `README.md`;
+- the SIP/research-guest/AMFI preparation from the main `README.md`;
+- enough disk space for IPSWs, restore artifacts, and the sparse VM disk;
 - Homebrew and Python 3;
-- Tailscale access;
-- passwordless `sudo` for the dedicated runner account.
+- a dedicated logged-in macOS runner account;
+- passwordless `sudo` for that dedicated account;
+- access to the same Tailscale network as the real iPhone.
 
-A hosted Mac, cloud macOS VM, UTM guest, or another nested Mac cannot boot the PV=3 virtual iPhone.
+## 1. Prepare macOS boot policy
 
-## 1. Register the Mac as a self-hosted runner
+Choose one supported path from the main README.
 
-In this repository, open:
+### Most permissive
+
+Run in Recovery:
+
+```bash
+csrutil disable
+csrutil allow-research-guests enable
+```
+
+Then boot macOS, run this, and reboot again:
+
+```bash
+sudo nvram boot-args="amfi_get_out_of_my_way=1 -v"
+```
+
+### More restricted
+
+Run in Recovery:
+
+```bash
+csrutil enable --without debug
+csrutil allow-research-guests enable
+```
+
+After building vphone, allowlist the app with the bundled `vphone-amfidont` helper as documented upstream.
+
+## 2. Register the physical Mac runner
+
+Open this repository and go to:
 
 `Settings → Actions → Runners → New self-hosted runner`
 
-Choose **macOS / ARM64** and run GitHub's displayed commands on the physical Mac. Add the custom label `vphone` during configuration:
+Choose **macOS / ARM64**. Run GitHub's displayed download/configuration commands and add the custom `vphone` label:
 
 ```bash
-./config.sh --url https://github.com/NightVibes33/vphone-cli --token TOKEN_FROM_GITHUB --labels vphone
-sudo ./svc.sh install
-sudo ./svc.sh start
+./config.sh \
+  --url https://github.com/NightVibes33/vphone-cli \
+  --token TOKEN_FROM_GITHUB \
+  --labels vphone
 ```
 
-The resulting runner must show these labels:
+The runner must have these labels:
 
 ```text
 self-hosted
@@ -47,11 +74,19 @@ ARM64
 vphone
 ```
 
-Use a dedicated local macOS account for this runner. Do not attach an untrusted public runner to a machine containing personal data.
+### Important: run it interactively
 
-## 2. Prepare passwordless sudo
+Log into the dedicated macOS account at the physical Mac desktop and start the runner with:
 
-The workflow is non-interactive. Give only the dedicated runner account passwordless sudo. Replace `vphone-runner` with its short username:
+```bash
+./run.sh
+```
+
+Do **not** install this runner with `svc.sh`. A background LaunchDaemon does not reliably have the logged-in GUI/WindowServer session needed by the visible vphone process. The workflow checks this and stops with a clear error when the runner is not interactive.
+
+## 3. Configure passwordless sudo
+
+Replace `vphone-runner` with the dedicated account's short username:
 
 ```bash
 sudo visudo -f /etc/sudoers.d/vphone-runner
@@ -63,37 +98,36 @@ Add:
 vphone-runner ALL=(ALL) NOPASSWD: ALL
 ```
 
-Then verify from that account:
+Verify:
 
 ```bash
 sudo -n true
 ```
 
-## 3. Add repository secrets
+Use a dedicated account and Mac. Do not give an automation runner unrestricted sudo on a machine containing sensitive personal files.
 
-Open:
+## 4. Add the Tailscale secret
 
-`Settings → Secrets and variables → Actions → New repository secret`
+Create this repository secret under:
 
-Create:
+`Settings → Secrets and variables → Actions`
 
 | Secret | Value |
 |---|---|
-| `TAILSCALE_AUTHKEY` | A reusable or ephemeral pre-authorized Tailscale auth key allowed by your ACLs |
-| `VPHONE_VNC_PASSWORD` | Exactly eight characters; used by macOS legacy VNC authentication |
+| `TAILSCALE_AUTHKEY` | A pre-authorized Tailscale auth key restricted by ACLs to your devices |
 
-Keep Tailscale ACLs restricted to your own devices. The workflow does not intentionally expose VNC or the browser viewer to the public internet.
+The direct VNC and noVNC listeners bind to the Mac's private Tailscale address. They are not intentionally exposed on the public internet.
 
-## 4. Prepare the Mac once
+## 5. Verify the physical Mac
 
-Follow the main README's host preparation in Recovery and macOS. Reboot after changing SIP, research-guest, AMFI, or NVRAM settings.
-
-Before triggering the real job, these commands must succeed on the physical Mac:
+Run these commands from the same logged-in account that starts `./run.sh`:
 
 ```bash
 uname -m                         # arm64
 sw_vers -productVersion          # 15 or newer
 sysctl -n kern.hv_support        # 1
+sysctl -n kern.hv_vmm_present    # must not be 1
+stat -f '%Su' /dev/console       # must equal the runner account
 csrutil status
 csrutil allow-research-guests status
 sudo -n true
@@ -101,62 +135,81 @@ brew --version
 python3 --version
 ```
 
-## 5. Run the workflow
+## 6. Start the real boot
 
 Open:
 
-`Actions → vphone-cli Remote Lab → Run workflow`
+`Actions → vphone-cli iPhone Remote Lab → Run workflow`
 
-For the real VM choose:
+Select:
 
 ```text
 mode: boot-bare-metal
 vm_name: github-phone
 variant: jb
-keep_alive_minutes: 300
+boot_timeout_seconds: 1800
+keep_alive_minutes: 120
 ```
 
-The first successful run downloads and prepares firmware, restores the VM, installs the selected CFW, and boots it. Later runs reuse `$HOME/.vphone/VMs/github-phone` on the physical Mac.
+The first run performs the full upstream sequence:
 
-The workflow summary prints the connection addresses after launch.
+```text
+download → firmware preparation → patch → DFU restore → CFW install → first boot
+```
 
-## 6. View it from your real iPhone
+Later runs reuse the persistent VM under:
 
-1. Install Tailscale on the iPhone.
-2. Sign into the same tailnet used by the physical Mac runner.
-3. Enable the Tailscale VPN connection.
-4. Open the completed GitHub Actions run and expand its summary.
-5. Tap the **Open on your iPhone in Safari** link.
+```text
+~/.vphone/VMs/github-phone
+```
 
-The link has this shape:
+The workflow uses the documented launch form:
+
+```bash
+vphone-cli vm launch github-phone
+```
+
+The firmware variant is applied during `vm create`; it is not incorrectly passed to `vm launch`.
+
+## 7. Connect from the real iPhone
+
+Install Tailscale on the real iPhone, sign into the same tailnet, and enable its VPN connection.
+
+A successful Actions summary shows **Virtual iPhone boot verified** and prints both options.
+
+### noVNC option
+
+Open the printed address in iPhone Safari:
 
 ```text
 http://TAILSCALE_IP:6080/vnc.html?autoconnect=true&resize=scale
 ```
 
-Safari then displays the virtual iPhone. Touches and keyboard input are forwarded through noVNC to the virtual device. noVNC requires a modern browser; current iPhone Safari exceeds its documented Safari 15 minimum.
+### Native VNC option
 
-The browser address only works while the workflow's `Keep the iPhone-visible lab online` step is running. The selected `keep_alive_minutes` value controls that window.
-
-## Alternative connections
-
-The summary also provides:
+Enter this in an iOS VNC client:
 
 ```text
 vnc://TAILSCALE_IP:5901
+```
+
+For the `jb` variant, SSH is also printed when port `22222` becomes available:
+
+```text
 ssh -p 22222 mobile@TAILSCALE_IP
 ```
 
-Use the VNC address with a native iPhone VNC client when preferred. For the `jb` variant, the default guest SSH password documented upstream is `alpine`; change it after first boot.
+The upstream default jailbreak password is `alpine`; change it after first boot.
 
-If automatic guest discovery fails, connect to the physical Mac desktop instead:
+## What green means
 
-```text
-vnc://TAILSCALE_IP:5900
-```
+The real boot job cannot reach its green state merely because the project compiled. Before publishing the links, it verifies all of the following:
 
-The vphone window remains visible there.
+- the host is physical Apple silicon rather than a nested Mac VM;
+- the signed vphone binary passes the upstream boot preflight;
+- `vm create` completed or an existing persistent VM was found;
+- the `vm launch` process stayed alive;
+- the virtual iPhone became reachable on guest VNC port `5901`;
+- both the Tailscale native-VNC listener and noVNC listener started successfully.
 
-## What the normal GitHub runner can do
-
-Run `hosted-capability-probe` to build the project and collect host/preflight diagnostics. It cannot boot the virtual iPhone because the GitHub-hosted runner is nested. The workflow deliberately avoids downloading full firmware in probe mode.
+`hosted-capability-probe` remains diagnostic only. It never claims to boot an iPhone and deliberately does not download or restore firmware.
