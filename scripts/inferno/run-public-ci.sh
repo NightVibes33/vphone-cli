@@ -40,6 +40,19 @@ replace_once(
     "minimal Inferno clone",
 )
 
+# Inferno intentionally leaves the macOS executable unsigned and gives it an
+# -unsigned suffix. Accept either upstream output name.
+replace_once(
+    '  cp "$INFERNO_SRC/build/qemu-system-aarch64" "$QEMU"',
+    '''  QEMU_SOURCE="$INFERNO_SRC/build/qemu-system-aarch64"
+  if [ ! -x "$QEMU_SOURCE" ]; then
+    QEMU_SOURCE="$INFERNO_SRC/build/qemu-system-aarch64-unsigned"
+  fi
+  [ -x "$QEMU_SOURCE" ] || fail 'Inferno did not produce an aarch64 system executable'
+  cp "$QEMU_SOURCE" "$QEMU"''',
+    "Inferno executable name",
+)
+
 # The Linux companion needs ARM UEFI, not Inferno's huge EDK2 source tree.
 # Homebrew QEMU ships a ready-to-use firmware image.
 old_uefi = '''  UEFI_SOURCE="$(find "$INFERNO_SRC" -type f \\( -name 'edk2-aarch64-code.fd' -o -name 'edk2-aarch64-code.fd.bz2' \\) | head -n1)"
