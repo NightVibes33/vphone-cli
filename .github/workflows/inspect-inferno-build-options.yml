@@ -1,0 +1,43 @@
+name: Inspect Inferno Build Options
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/inspect-inferno-options-request
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inspect current Inferno encryption controls
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/Inferno"
+          git clone --depth 1 https://github.com/ChefKissInc/Inferno.git "$RUNNER_TEMP/Inferno"
+          mkdir -p status
+          {
+            echo '# ENABLE_DATA_ENCRYPTION references'
+            rg -n -C 5 'ENABLE_DATA_ENCRYPTION|DATA_ENCRYPTION|data[_-]encryption' "$RUNNER_TEMP/Inferno" || true
+            echo
+            echo '# Configure help matches'
+            cd "$RUNNER_TEMP/Inferno"
+            ./configure --help 2>&1 | rg -n -i -C 2 'encrypt|sep|apple|inferno' || true
+          } > "$GITHUB_WORKSPACE/status/inferno-build-options.txt"
+
+      - name: Commit inspection result
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add status/inferno-build-options.txt
+          git commit -m 'Record Inferno encryption build options' || exit 0
+          git pull --rebase origin main
+          git push origin HEAD:main
