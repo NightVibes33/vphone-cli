@@ -1,5 +1,5 @@
-requested_at=2026-08-01T20:24:00Z
-nonce=complete-companion-dependencies-03
+requested_at=2026-08-01T20:34:00Z
+nonce=current-t8030-properties-04
 workflow=inferno-public-jailbroken-iphone
 hardware=iPhone11-T8030
 ios=14.0-beta-5
@@ -11,5 +11,7 @@ usb_socket=/tmp/InfernoUSBRemote
 libimobiledevice_glue=source-build
 libirecovery=source-build
 companion_error_propagation=enabled
+t8030_trustcache_property=trustcache
+t8030_ticket_property=ticket
 cancel_in_progress=false
 keep_alive_minutes=60
