@@ -111,6 +111,14 @@ if trustcache_refs != 2 or ticket_refs != 2:
 s = s.replace('trustcache-filename=', 'trustcache=')
 s = s.replace('ticket-filename=', 'ticket=')
 
+# Modern Inferno's explicit recovery mode is named enter_recovery. The old
+# qemu-t8030 value manual is rejected by the property setter.
+replace_once(
+    'boot-mode=manual',
+    'boot-mode=enter_recovery',
+    "T8030 recovery boot mode",
+)
+
 replace_once(
     "  -display none -nographic \\\n",
     "  -display none \\\n",
