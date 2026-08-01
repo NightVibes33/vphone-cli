@@ -1,12 +1,12 @@
 {
   "state": "running",
-  "stage": "checkout-ready",
-  "updated_at": "2026-08-01T22:59:02Z",
+  "stage": "dependencies-ready",
+  "updated_at": "2026-08-01T23:00:02Z",
   "repository": "NightVibes33/vphone-cli",
   "run_id": "30722409251",
   "run_attempt": "1",
   "head_sha": "705fe4905640dcf1b6278e7a045da38ed754c210",
   "runner": "GitHub Actions 1000011503",
-  "message": "GitHub macOS runner started and checked out the public repository.",
+  "message": "Homebrew dependencies and the private Python environment are installed.",
   "details": ""
 }
