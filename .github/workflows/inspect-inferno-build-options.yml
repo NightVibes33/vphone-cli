@@ -25,11 +25,14 @@ jobs:
           mkdir -p status
           {
             echo '# ENABLE_DATA_ENCRYPTION references'
-            rg -n -C 5 'ENABLE_DATA_ENCRYPTION|DATA_ENCRYPTION|data[_-]encryption' "$RUNNER_TEMP/Inferno" || true
+            grep -RInE -C 5 \
+              'ENABLE_DATA_ENCRYPTION|DATA_ENCRYPTION|data[_-]encryption' \
+              "$RUNNER_TEMP/Inferno" \
+              --exclude-dir=.git --exclude-dir=build || true
             echo
             echo '# Configure help matches'
             cd "$RUNNER_TEMP/Inferno"
-            ./configure --help 2>&1 | rg -n -i -C 2 'encrypt|sep|apple|inferno' || true
+            ./configure --help 2>&1 | grep -Ein -C 2 'encrypt|sep|apple|inferno' || true
           } > "$GITHUB_WORKSPACE/status/inferno-build-options.txt"
 
       - name: Commit inspection result
