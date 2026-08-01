@@ -1,5 +1,5 @@
-requested_at=2026-08-01T20:13:00Z
-nonce=usb-default-socket-libirecovery-02
+requested_at=2026-08-01T20:24:00Z
+nonce=complete-companion-dependencies-03
 workflow=inferno-public-jailbroken-iphone
 hardware=iPhone11-T8030
 ios=14.0-beta-5
@@ -8,5 +8,8 @@ clone=util-mlib-only
 project_root=github-workspace
 companion_romfile=disabled
 usb_socket=/tmp/InfernoUSBRemote
+libimobiledevice_glue=source-build
 libirecovery=source-build
+companion_error_propagation=enabled
+cancel_in_progress=false
 keep_alive_minutes=60
