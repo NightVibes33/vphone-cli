@@ -1,5 +1,5 @@
-requested_at=2026-08-01T20:50:00Z
-nonce=simulated-sep-unencrypted-06
+requested_at=2026-08-01T21:00:00Z
+nonce=branding-bundled-07
 workflow=inferno-public-jailbroken-iphone
 hardware=iPhone11-T8030
 ios=14.0-beta-5
@@ -16,4 +16,5 @@ t8030_ticket_property=ticket
 t8030_boot_mode=enter_recovery
 sep=simulated
 data_encryption=disabled-at-build
+branding_asset=bundled
 keep_alive_minutes=60
