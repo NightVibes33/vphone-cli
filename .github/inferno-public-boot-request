@@ -1,10 +1,11 @@
-requested_at=2026-08-01T19:48:00Z
-nonce=repository-root-fix-01
+requested_at=2026-08-01T19:58:00Z
+nonce=disable-companion-option-roms-01
 workflow=inferno-public-jailbroken-iphone
 hardware=iPhone11-T8030
 ios=14.0-beta-5
 mode=public-zero-input
 clone=util-mlib-only
 project_root=github-workspace
+companion_romfile=disabled
 cancel_in_progress=false
 keep_alive_minutes=60
