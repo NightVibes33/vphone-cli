@@ -27,7 +27,7 @@ on:
           - jb
           - exp
       keep_alive_minutes:
-        description: VNC/SSH access window
+        description: iPhone browser/VNC/SSH access window
         required: true
         default: '300'
         type: choice
@@ -186,6 +186,7 @@ jobs:
           fi
           sudo -n true
           command -v brew >/dev/null
+          command -v python3 >/dev/null
           {
             echo "host=$(scutil --get ComputerName 2>/dev/null || hostname)"
             uname -a
@@ -221,12 +222,21 @@ jobs:
           echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
           echo "Mac desktop VNC: vnc://$TS_IP:5900" | tee "$RUNNER_TEMP/remote-addresses.txt"
 
-      - name: Install small forwarding utilities
+      - name: Install forwarding and iPhone browser-view utilities
         shell: bash
         run: |
           set -euo pipefail
           brew list socat >/dev/null 2>&1 || brew install socat
           brew list jq >/dev/null 2>&1 || brew install jq
+
+          NOVNC_ROOT="$RUNNER_TEMP/noVNC"
+          NOVNC_VENV="$RUNNER_TEMP/novnc-venv"
+          rm -rf "$NOVNC_ROOT" "$NOVNC_VENV"
+          git clone --depth 1 https://github.com/novnc/noVNC.git "$NOVNC_ROOT"
+          python3 -m venv "$NOVNC_VENV"
+          "$NOVNC_VENV/bin/python" -m pip install --upgrade pip websockify
+          echo "NOVNC_ROOT=$NOVNC_ROOT" >> "$GITHUB_ENV"
+          echo "NOVNC_VENV=$NOVNC_VENV" >> "$GITHUB_ENV"
 
       - name: Build and bundle vphone-cli
         shell: bash
@@ -281,7 +291,7 @@ jobs:
           kill -0 "$(cat "$RUNNER_TEMP/vphone-launch.pid")"
           tail -n 160 "$RUNNER_TEMP/vphone-launch.log" || true
 
-      - name: Discover and forward direct guest VNC and SSH
+      - name: Discover guest and expose Safari, VNC, and SSH access
         id: guest-forwarding
         continue-on-error: true
         shell: bash
@@ -320,10 +330,25 @@ jobs:
             >"$RUNNER_TEMP/socat-ssh.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/socat-ssh.pid"
 
+          nohup "$NOVNC_VENV/bin/websockify" --web "$NOVNC_ROOT" \
+            6080 "$GUEST_IP:5901" >"$RUNNER_TEMP/novnc.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/novnc.pid"
+
+          for attempt in $(seq 1 30); do
+            if nc -z -G 1 127.0.0.1 6080 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          nc -z -G 2 127.0.0.1 6080
+
+          IPHONE_VIEW_URL="http://$TS_IP:6080/vnc.html?autoconnect=true&resize=scale"
+          echo "IPHONE_VIEW_URL=$IPHONE_VIEW_URL" >> "$GITHUB_ENV"
+          echo "iPhone Safari view: $IPHONE_VIEW_URL" | tee -a "$RUNNER_TEMP/remote-addresses.txt"
           echo "Direct virtual-iPhone VNC: vnc://$TS_IP:5901" | tee -a "$RUNNER_TEMP/remote-addresses.txt"
           echo "Virtual-iPhone SSH: ssh -p 22222 mobile@$TS_IP" | tee -a "$RUNNER_TEMP/remote-addresses.txt"
 
-      - name: Publish connection details
+      - name: Publish iPhone connection details
         if: always()
         shell: bash
         env:
@@ -336,19 +361,21 @@ jobs:
             echo "- Repository: \`$GITHUB_REPOSITORY\`"
             echo "- VM: \`$VM_NAME\`"
             echo "- Variant: \`$VARIANT\`"
-            echo "- Mac desktop: \`vnc://$TS_IP:5900\`"
-            if [ -n "${GUEST_IP:-}" ]; then
-              echo "- Direct virtual-iPhone VNC: \`vnc://$TS_IP:5901\`"
+            if [ -n "${IPHONE_VIEW_URL:-}" ]; then
+              echo "- **Open on your iPhone in Safari:** [$IPHONE_VIEW_URL]($IPHONE_VIEW_URL)"
+              echo '- Safari shows the virtual iPhone and sends touch input through noVNC.'
+              echo "- Direct VNC app address: \`vnc://$TS_IP:5901\`"
               echo "- Virtual-iPhone SSH: \`ssh -p 22222 mobile@$TS_IP\`"
               echo '- Default jailbreak SSH password: `alpine`'
             else
-              echo '- Direct guest forwarding was not auto-discovered. Use Mac desktop VNC and connect from the vphone window.'
+              echo "- Mac desktop fallback: \`vnc://$TS_IP:5900\`"
+              echo '- Direct guest discovery did not complete; use the Mac desktop VNC view.'
             fi
-            echo '- VNC authentication uses the eight-character `VPHONE_VNC_PASSWORD` secret.'
-            echo '- Addresses are reachable only from devices authorized by your Tailscale ACLs.'
+            echo '- Your iPhone must have Tailscale enabled and be signed into the same tailnet.'
+            echo '- The browser address is private to devices allowed by your Tailscale ACLs.'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep the VNC lab online
+      - name: Keep the iPhone-visible lab online
         shell: bash
         env:
           KEEP_ALIVE: ${{ inputs.keep_alive_minutes }}
@@ -361,7 +388,12 @@ jobs:
               tail -n 240 "$RUNNER_TEMP/vphone-launch.log" || true
               exit 1
             fi
-            echo "$(date -u +%FT%TZ) vphone remote lab active at $TS_IP"
+            if [ -f "$RUNNER_TEMP/novnc.pid" ] && ! kill -0 "$(cat "$RUNNER_TEMP/novnc.pid")" 2>/dev/null; then
+              echo 'noVNC exited unexpectedly.'
+              tail -n 160 "$RUNNER_TEMP/novnc.log" || true
+              exit 1
+            fi
+            echo "$(date -u +%FT%TZ) iPhone view active at ${IPHONE_VIEW_URL:-unavailable}"
             sleep 60
           done
 
@@ -380,6 +412,7 @@ jobs:
             ${{ runner.temp }}/vm-info.json
             ${{ runner.temp }}/vphone-launch.log
             ${{ runner.temp }}/guest-ip.txt
+            ${{ runner.temp }}/novnc.log
             ${{ runner.temp }}/socat-vnc.log
             ${{ runner.temp }}/socat-ssh.log
           if-no-files-found: warn
@@ -392,6 +425,7 @@ jobs:
           VM_NAME: ${{ inputs.vm_name }}
         run: |
           set +e
+          [ -f "$RUNNER_TEMP/novnc.pid" ] && kill "$(cat "$RUNNER_TEMP/novnc.pid")" 2>/dev/null
           [ -f "$RUNNER_TEMP/socat-vnc.pid" ] && kill "$(cat "$RUNNER_TEMP/socat-vnc.pid")" 2>/dev/null
           [ -f "$RUNNER_TEMP/socat-ssh.pid" ] && kill "$(cat "$RUNNER_TEMP/socat-ssh.pid")" 2>/dev/null
           [ -n "${VPHONE_BIN:-}" ] && "$VPHONE_BIN" vm stop "$VM_NAME" --timeout 20
