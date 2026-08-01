@@ -1,12 +1,12 @@
 workflow=Public Jailbroken iPhone (Inferno)
-event_action=requested
+event_action=completed
 run_id=30718155083
 run_number=16
 run_attempt=1
 trigger_event=push
-status=queued
-conclusion=pending
+status=completed
+conclusion=failure
 created_at=2026-08-01T20:59:09Z
-updated_at=2026-08-01T20:59:09Z
+updated_at=2026-08-01T21:06:21Z
 head_sha=2328b0fe257e74f391f9c67f04fdfb6134530f8f
 url=https://github.com/NightVibes33/vphone-cli/actions/runs/30718155083
