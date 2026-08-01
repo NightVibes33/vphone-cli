@@ -31,7 +31,7 @@ uname -a
 apt-get update
 apt-get install -y --no-install-recommends \
   autoconf automake build-essential ca-certificates curl git libcurl4-openssl-dev \
-  libimobiledevice-dev libimobiledevice-utils libirecovery-dev libplist-dev \
+  libimobiledevice-dev libimobiledevice-utils libplist-dev libreadline-dev \
   libssl-dev libtool libusb-1.0-0-dev libusbmuxd-dev libusbmuxd-tools \
   libzip-dev pkg-config python3 usbmuxd
 
@@ -44,6 +44,20 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 cd "$WORK"
 
+# Ubuntu Noble ARM64 does not publish libirecovery-dev. Build the public
+# libirecovery generation used by the original T8030 restore flow.
+git clone --depth 200 https://github.com/libimobiledevice/libirecovery.git
+cd libirecovery
+LIBIRECOVERY_COMMIT="$(git rev-list -n 1 --before='2022-03-10 00:00:00 UTC' HEAD)"
+[ -n "$LIBIRECOVERY_COMMIT" ] || fail 'could not resolve a compatible libirecovery commit'
+git checkout "$LIBIRECOVERY_COMMIT"
+./autogen.sh --prefix=/usr/local
+make -j2
+make install
+ldconfig
+command -v irecovery >/dev/null || fail 'libirecovery did not install irecovery'
+
+cd "$WORK"
 git clone --depth 200 https://github.com/libimobiledevice/idevicerestore.git
 cd idevicerestore
 
@@ -80,7 +94,8 @@ p.write_text(s)
 PY
 fi
 
-./autogen.sh --prefix=/usr/local
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-} \
+  ./autogen.sh --prefix=/usr/local
 make -j2
 make install
 ldconfig
