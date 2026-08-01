@@ -1,0 +1,259 @@
+name: Free Public Jailbroken iPhone (Inferno)
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_alive_minutes:
+        description: Keep noVNC and native VNC online after verified boot
+        required: true
+        default: '45'
+        type: choice
+        options:
+          - '30'
+          - '45'
+          - '55'
+  push:
+    branches: [main]
+    paths:
+      - .github/inferno-public-boot-request
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inferno-public-jailbroken-iphone
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: Restore, jailbreak, boot, and verify iPhone 11
+    runs-on: macos-26
+    timeout-minutes: 355
+
+    steps:
+      - name: Check out public repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Select session settings
+        shell: bash
+        env:
+          REQUESTED_KEEP_ALIVE: ${{ inputs.keep_alive_minutes }}
+        run: |
+          set -euo pipefail
+          echo "KEEP_ALIVE_MINUTES=${REQUESTED_KEEP_ALIVE:-45}" >> "$GITHUB_ENV"
+          echo "INFERNO_WORK_DIR=$RUNNER_TEMP/inferno-public-iphone" >> "$GITHUB_ENV"
+
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
+          sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData" 2>/dev/null || true
+          brew cleanup --prune=all >/dev/null 2>&1 || true
+          df -h
+
+      - name: Install public build and remote-view dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install \
+            libtool meson ninja pkgconf dtc glib gnutls jpeg-turbo libpng \
+            libslirp libssh libusb lzo ncurses nettle pixman snappy vde zstd \
+            lzfse cdrtools jq sshpass cloudflared
+          python3 --version
+          hdiutil help >/dev/null
+
+      - name: Build Inferno, restore Apple firmware, install jailbreak, and verify root
+        id: boot
+        shell: bash
+        env:
+          INFERNO_RESTORE_TIMEOUT_SECONDS: '10800'
+          INFERNO_INSTALL_TIMEOUT_SECONDS: '1800'
+          INFERNO_BOOT_TIMEOUT_SECONDS: '2700'
+        run: |
+          set -euo pipefail
+          chmod +x scripts/inferno/*.sh
+          scripts/inferno/run-public-github-boot.sh \
+            2>&1 | tee "$RUNNER_TEMP/inferno-public-boot.log"
+
+          test -f "$INFERNO_WORK_DIR/result.env"
+          source "$INFERNO_WORK_DIR/result.env"
+          test "$BOOTED" = 1
+          test "$SPRINGBOARD" = 1
+          test "$AMFI_RESEARCH_MODE" = 1
+          test "$ROOT_SSH" = 1
+          test "$JAILBREAK_MARKER" = 1
+
+          {
+            echo "vnc_password=$VNC_PASSWORD"
+            echo "ios_pid=$IOS_PID"
+            echo "companion_pid=$COMPANION_PID"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "VNC_PASSWORD=$VNC_PASSWORD"
+            echo "IOS_PID=$IOS_PID"
+            echo "COMPANION_PID=$COMPANION_PID"
+          } >> "$GITHUB_ENV"
+
+      - name: Start iPhone Safari noVNC view
+        shell: bash
+        run: |
+          set -euo pipefail
+          NOVNC_ROOT="$RUNNER_TEMP/noVNC"
+          NOVNC_VENV="$RUNNER_TEMP/novnc-venv"
+          git clone --depth 1 https://github.com/novnc/noVNC.git "$NOVNC_ROOT"
+          python3 -m venv "$NOVNC_VENV"
+          "$NOVNC_VENV/bin/python" -m pip install --disable-pip-version-check websockify
+
+          nohup "$NOVNC_VENV/bin/websockify" \
+            --web "$NOVNC_ROOT" 127.0.0.1:6080 127.0.0.1:5901 \
+            > "$RUNNER_TEMP/novnc.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/novnc.pid"
+
+          for attempt in $(seq 1 30); do
+            nc -z 127.0.0.1 6080 >/dev/null 2>&1 && break
+            sleep 2
+          done
+          nc -z 127.0.0.1 6080
+
+      - name: Publish noVNC through a free HTTPS quick tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 \
+            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared.pid"
+
+          NOVNC_ORIGIN=''
+          for attempt in $(seq 1 60); do
+            NOVNC_ORIGIN="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' \
+              "$RUNNER_TEMP/cloudflared.log" | tail -n1 || true)"
+            [ -n "$NOVNC_ORIGIN" ] && break
+            kill -0 "$(cat "$RUNNER_TEMP/cloudflared.pid")" 2>/dev/null || {
+              cat "$RUNNER_TEMP/cloudflared.log"
+              exit 1
+            }
+            sleep 2
+          done
+          test -n "$NOVNC_ORIGIN"
+
+          NOVNC_URL="$NOVNC_ORIGIN/vnc.html?autoconnect=true&resize=scale"
+          echo "NOVNC_URL=$NOVNC_URL" >> "$GITHUB_ENV"
+          echo "noVNC=$NOVNC_URL" > "$RUNNER_TEMP/remote-addresses.txt"
+
+      - name: Publish native VNC through a free TCP tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=20 \
+            -o ServerAliveCountMax=3 \
+            -o ExitOnForwardFailure=yes \
+            -p 443 -R0:127.0.0.1:5901 tcp@free.pinggy.io -T \
+            > "$RUNNER_TEMP/pinggy-vnc.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/pinggy-vnc.pid"
+
+          NATIVE_VNC_URL=''
+          for attempt in $(seq 1 60); do
+            NATIVE_VNC_URL="$(grep -Eo 'tcp://[A-Za-z0-9.-]+:[0-9]+' \
+              "$RUNNER_TEMP/pinggy-vnc.log" | head -n1 || true)"
+            [ -n "$NATIVE_VNC_URL" ] && break
+            kill -0 "$(cat "$RUNNER_TEMP/pinggy-vnc.pid")" 2>/dev/null || break
+            sleep 2
+          done
+
+          if [ -n "$NATIVE_VNC_URL" ]; then
+            echo "NATIVE_VNC_URL=$NATIVE_VNC_URL" >> "$GITHUB_ENV"
+            echo "native_vnc=$NATIVE_VNC_URL" >> "$RUNNER_TEMP/remote-addresses.txt"
+          else
+            echo 'NATIVE_VNC_URL=unavailable' >> "$GITHUB_ENV"
+            echo 'native_vnc=unavailable' >> "$RUNNER_TEMP/remote-addresses.txt"
+            echo 'Pinggy did not allocate a free TCP endpoint; noVNC remains available.'
+            cat "$RUNNER_TEMP/pinggy-vnc.log" || true
+          fi
+
+      - name: Publish verified iPhone connections
+        shell: bash
+        run: |
+          {
+            echo '## ✅ Jailbroken iPhone boot verified'
+            echo
+            echo '- Emulated hardware: **iPhone 11 (T8030/A13 profile)**'
+            echo '- Firmware: **iOS 14 beta 5, downloaded directly from Apple during this run**'
+            echo '- SpringBoard/backboardd: **verified**'
+            echo '- AMFI research mode: **verified**'
+            echo '- Root SSH UID 0: **verified**'
+            echo '- Persistent jailbreak marker: **verified**'
+            echo
+            echo '### Open from your real iPhone'
+            echo "- **Safari/noVNC:** [$NOVNC_URL]($NOVNC_URL)"
+            if [ "${NATIVE_VNC_URL:-unavailable}" != unavailable ]; then
+              echo "- **Native VNC endpoint:** \`$NATIVE_VNC_URL\`"
+            else
+              echo '- **Native VNC endpoint:** unavailable for this run; use noVNC.'
+            fi
+            echo "- **One-time VNC password:** \`$VNC_PASSWORD\`"
+            echo
+            echo "The temporary viewers remain online for about $KEEP_ALIVE_MINUTES minutes."
+            echo 'The repository and uploaded logs do not contain the Apple IPSW, modified ramdisk, or NAND image.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload boot evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inferno-jailbroken-iphone-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/inferno-public-boot.log
+            ${{ runner.temp }}/remote-addresses.txt
+            ${{ runner.temp }}/novnc.log
+            ${{ runner.temp }}/cloudflared.log
+            ${{ runner.temp }}/pinggy-vnc.log
+            ${{ runner.temp }}/inferno-public-iphone/result.env
+            ${{ runner.temp }}/inferno-public-iphone/logs/*.log
+            ${{ runner.temp }}/inferno-public-iphone/logs/*.txt
+            ${{ runner.temp }}/inferno-public-iphone/share/companion-restore.log
+            ${{ runner.temp }}/inferno-public-iphone/share/idevicerestore.log
+            ${{ runner.temp }}/inferno-public-iphone/share/ideviceinfo.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Keep the verified iPhone online
+        shell: bash
+        run: |
+          set -euo pipefail
+          end=$((SECONDS + KEEP_ALIVE_MINUTES * 60))
+          while [ "$SECONDS" -lt "$end" ]; do
+            kill -0 "$IOS_PID"
+            kill -0 "$COMPANION_PID"
+            kill -0 "$(cat "$RUNNER_TEMP/novnc.pid")"
+            kill -0 "$(cat "$RUNNER_TEMP/cloudflared.pid")"
+            nc -z 127.0.0.1 5901
+            nc -z 127.0.0.1 6080
+            nc -z 127.0.0.1 22222
+            echo "$(date -u +%FT%TZ) jailbroken iPhone online: $NOVNC_URL"
+            sleep 60
+          done
+
+      - name: Stop temporary public session
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for file in \
+            "$RUNNER_TEMP/cloudflared.pid" \
+            "$RUNNER_TEMP/pinggy-vnc.pid" \
+            "$RUNNER_TEMP/novnc.pid" \
+            "$INFERNO_WORK_DIR/ios.pid" \
+            "$INFERNO_WORK_DIR/companion.pid"; do
+            [ -f "$file" ] && kill "$(cat "$file")" 2>/dev/null || true
+          done
+          rm -f /tmp/usbqemu
