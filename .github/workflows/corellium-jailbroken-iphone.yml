@@ -41,6 +41,10 @@ on:
           - keep-running
           - stop
           - delete
+  push:
+    branches: [main]
+    paths:
+      - .github/corellium-boot-request
 
 permissions:
   contents: read
@@ -58,6 +62,26 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Set run defaults
+        shell: bash
+        env:
+          INPUT_EXISTING_INSTANCE_ID: ${{ inputs.existing_instance_id }}
+          INPUT_INSTANCE_NAME: ${{ inputs.instance_name }}
+          INPUT_DEVICE_FLAVOR: ${{ inputs.device_flavor }}
+          INPUT_IOS_VERSION: ${{ inputs.ios_version }}
+          INPUT_WAIT_TIMEOUT_SECONDS: ${{ inputs.wait_timeout_seconds }}
+          INPUT_CLEANUP_MODE: ${{ inputs.cleanup_mode }}
+        run: |
+          set -euo pipefail
+          {
+            echo "RUN_EXISTING_INSTANCE_ID=${INPUT_EXISTING_INSTANCE_ID:-}"
+            echo "RUN_INSTANCE_NAME=${INPUT_INSTANCE_NAME:-github-jailbroken-iphone}"
+            echo "RUN_DEVICE_FLAVOR=${INPUT_DEVICE_FLAVOR:-iphone16pm}"
+            echo "RUN_IOS_VERSION=${INPUT_IOS_VERSION:-18.0}"
+            echo "RUN_WAIT_TIMEOUT_SECONDS=${INPUT_WAIT_TIMEOUT_SECONDS:-3600}"
+            echo "RUN_CLEANUP_MODE=${INPUT_CLEANUP_MODE:-keep-running}"
+          } >> "$GITHUB_ENV"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -105,11 +129,11 @@ jobs:
           CORELLIUM_API_TOKEN: ${{ secrets.CORELLIUM_API_TOKEN }}
           CORELLIUM_PROJECT: ${{ secrets.CORELLIUM_PROJECT }}
           CORELLIUM_UI_ENDPOINT: ${{ secrets.CORELLIUM_ENDPOINT }}
-          EXISTING_INSTANCE_ID: ${{ inputs.existing_instance_id }}
-          INSTANCE_NAME: ${{ inputs.instance_name }}
-          DEVICE_FLAVOR: ${{ inputs.device_flavor }}
-          IOS_VERSION: ${{ inputs.ios_version }}
-          WAIT_TIMEOUT_SECONDS: ${{ inputs.wait_timeout_seconds }}
+          EXISTING_INSTANCE_ID: ${{ env.RUN_EXISTING_INSTANCE_ID }}
+          INSTANCE_NAME: ${{ env.RUN_INSTANCE_NAME }}
+          DEVICE_FLAVOR: ${{ env.RUN_DEVICE_FLAVOR }}
+          IOS_VERSION: ${{ env.RUN_IOS_VERSION }}
+          WAIT_TIMEOUT_SECONDS: ${{ env.RUN_WAIT_TIMEOUT_SECONDS }}
           LOG_DIR: ${{ runner.temp }}/corellium-jailbroken-iphone
         run: |
           set -euo pipefail
@@ -123,9 +147,9 @@ jobs:
           INSTANCE_ID: ${{ steps.provision.outputs.instance_id }}
           INSTANCE_NAME: ${{ steps.provision.outputs.instance_name }}
           INSTANCE_WEB_URL: ${{ steps.provision.outputs.instance_web_url }}
-          DEVICE_FLAVOR: ${{ inputs.device_flavor }}
-          IOS_VERSION: ${{ inputs.ios_version }}
-          CLEANUP_MODE: ${{ inputs.cleanup_mode }}
+          DEVICE_FLAVOR: ${{ env.RUN_DEVICE_FLAVOR }}
+          IOS_VERSION: ${{ env.RUN_IOS_VERSION }}
+          CLEANUP_MODE: ${{ env.RUN_CLEANUP_MODE }}
         run: |
           {
             echo '## ✅ Jailbroken virtual iPhone boot verified'
@@ -138,13 +162,11 @@ jobs:
             echo '- Jailbreak/root evidence: **verified**'
             echo "- Cleanup mode: \`$CLEANUP_MODE\`"
             echo
-            echo "### Open it on your real iPhone"
+            echo '### Open it on your real iPhone'
             echo "1. Open [$INSTANCE_WEB_URL]($INSTANCE_WEB_URL) in Safari."
             echo '2. Sign in to the same Corellium account.'
             echo "3. Open the device named \`$INSTANCE_NAME\` or instance \`$INSTANCE_ID\`."
             echo '4. Tap the virtual iPhone screen to connect and control it.'
-            echo
-            echo 'The device is a Corellium jailbroken iOS VM with root filesystem access, SSH, Frida, Substitute, and Cydia support.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload boot evidence
@@ -168,7 +190,7 @@ jobs:
         shell: bash
         env:
           INSTANCE_ID: ${{ steps.provision.outputs.instance_id }}
-          CLEANUP_MODE: ${{ inputs.cleanup_mode }}
+          CLEANUP_MODE: ${{ env.RUN_CLEANUP_MODE }}
         run: |
           set +e
           case "$CLEANUP_MODE" in
