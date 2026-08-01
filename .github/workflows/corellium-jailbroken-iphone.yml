@@ -1,0 +1,184 @@
+name: GitHub Jailbroken iPhone (Corellium)
+
+on:
+  workflow_dispatch:
+    inputs:
+      existing_instance_id:
+        description: Optional Corellium instance ID to reuse
+        required: false
+        default: ''
+        type: string
+      instance_name:
+        description: Name for a newly created virtual iPhone
+        required: true
+        default: github-jailbroken-iphone
+        type: string
+      device_flavor:
+        description: Corellium iPhone hardware flavor
+        required: true
+        default: iphone16pm
+        type: string
+      ios_version:
+        description: Corellium-supported iOS version
+        required: true
+        default: '18.0'
+        type: string
+      wait_timeout_seconds:
+        description: Maximum time to wait for boot and the Corellium agent
+        required: true
+        default: '3600'
+        type: choice
+        options:
+          - '1800'
+          - '3600'
+          - '5400'
+      cleanup_mode:
+        description: What to do after verification
+        required: true
+        default: keep-running
+        type: choice
+        options:
+          - keep-running
+          - stop
+          - delete
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corellium-jailbroken-iphone
+  cancel-in-progress: false
+
+jobs:
+  boot-jailbroken-iphone:
+    name: Provision and verify jailbroken iPhone
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate Corellium credentials
+        shell: bash
+        env:
+          CORELLIUM_API_TOKEN: ${{ secrets.CORELLIUM_API_TOKEN }}
+          CORELLIUM_PROJECT: ${{ secrets.CORELLIUM_PROJECT }}
+        run: |
+          set -euo pipefail
+          test -n "$CORELLIUM_API_TOKEN" || {
+            echo 'Missing repository secret CORELLIUM_API_TOKEN.' >&2
+            exit 1
+          }
+          test -n "$CORELLIUM_PROJECT" || {
+            echo 'Missing repository secret CORELLIUM_PROJECT.' >&2
+            exit 1
+          }
+
+      - name: Install official Corellium CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @corellium/corellium-cli
+          corellium --version
+          jq --version
+
+      - name: Log in to Corellium
+        shell: bash
+        env:
+          CORELLIUM_API_TOKEN: ${{ secrets.CORELLIUM_API_TOKEN }}
+          CORELLIUM_UI_ENDPOINT: ${{ secrets.CORELLIUM_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          endpoint="${CORELLIUM_UI_ENDPOINT:-https://app.corellium.com}"
+          corellium login --apitoken "$CORELLIUM_API_TOKEN" --endpoint "$endpoint"
+
+      - name: Create, boot, and verify jailbroken iPhone
+        id: provision
+        shell: bash
+        env:
+          CORELLIUM_API_TOKEN: ${{ secrets.CORELLIUM_API_TOKEN }}
+          CORELLIUM_PROJECT: ${{ secrets.CORELLIUM_PROJECT }}
+          CORELLIUM_UI_ENDPOINT: ${{ secrets.CORELLIUM_ENDPOINT }}
+          EXISTING_INSTANCE_ID: ${{ inputs.existing_instance_id }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+          DEVICE_FLAVOR: ${{ inputs.device_flavor }}
+          IOS_VERSION: ${{ inputs.ios_version }}
+          WAIT_TIMEOUT_SECONDS: ${{ inputs.wait_timeout_seconds }}
+          LOG_DIR: ${{ runner.temp }}/corellium-jailbroken-iphone
+        run: |
+          set -euo pipefail
+          chmod +x scripts/corellium_jailbroken_iphone.sh
+          scripts/corellium_jailbroken_iphone.sh \
+            2>&1 | tee "$RUNNER_TEMP/corellium-provision.log"
+
+      - name: Publish iPhone access details
+        shell: bash
+        env:
+          INSTANCE_ID: ${{ steps.provision.outputs.instance_id }}
+          INSTANCE_NAME: ${{ steps.provision.outputs.instance_name }}
+          INSTANCE_WEB_URL: ${{ steps.provision.outputs.instance_web_url }}
+          DEVICE_FLAVOR: ${{ inputs.device_flavor }}
+          IOS_VERSION: ${{ inputs.ios_version }}
+          CLEANUP_MODE: ${{ inputs.cleanup_mode }}
+        run: |
+          {
+            echo '## ✅ Jailbroken virtual iPhone boot verified'
+            echo
+            echo "- Instance name: \`$INSTANCE_NAME\`"
+            echo "- Instance ID: \`$INSTANCE_ID\`"
+            echo "- Hardware: \`$DEVICE_FLAVOR\`"
+            echo "- iOS: \`$IOS_VERSION\`"
+            echo '- Corellium agent: **ready**'
+            echo '- Jailbreak/root evidence: **verified**'
+            echo "- Cleanup mode: \`$CLEANUP_MODE\`"
+            echo
+            echo "### Open it on your real iPhone"
+            echo "1. Open [$INSTANCE_WEB_URL]($INSTANCE_WEB_URL) in Safari."
+            echo '2. Sign in to the same Corellium account.'
+            echo "3. Open the device named \`$INSTANCE_NAME\` or instance \`$INSTANCE_ID\`."
+            echo '4. Tap the virtual iPhone screen to connect and control it.'
+            echo
+            echo 'The device is a Corellium jailbroken iOS VM with root filesystem access, SSH, Frida, Substitute, and Cydia support.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload boot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corellium-jailbroken-iphone-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/corellium-provision.log
+            ${{ runner.temp }}/corellium-jailbroken-iphone/instance.json
+            ${{ runner.temp }}/corellium-jailbroken-iphone/agent-ready.json
+            ${{ runner.temp }}/corellium-jailbroken-iphone/apps.txt
+            ${{ runner.temp }}/corellium-jailbroken-iphone/files.txt
+            ${{ runner.temp }}/corellium-jailbroken-iphone/jailbreak-evidence.txt
+            ${{ runner.temp }}/corellium-jailbroken-iphone/result.env
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Apply requested cleanup
+        if: always() && steps.provision.outputs.instance_id != ''
+        shell: bash
+        env:
+          INSTANCE_ID: ${{ steps.provision.outputs.instance_id }}
+          CLEANUP_MODE: ${{ inputs.cleanup_mode }}
+        run: |
+          set +e
+          case "$CLEANUP_MODE" in
+            keep-running)
+              echo "Leaving Corellium instance $INSTANCE_ID running for browser access."
+              ;;
+            stop)
+              corellium instance stop "$INSTANCE_ID" true
+              ;;
+            delete)
+              corellium instance delete "$INSTANCE_ID"
+              ;;
+          esac
