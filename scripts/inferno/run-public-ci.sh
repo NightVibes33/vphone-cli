@@ -98,6 +98,19 @@ if socket_refs < 2:
     raise SystemExit(f"USB socket path: expected at least two matches, found {socket_refs}")
 s = s.replace('/tmp/usbqemu', '/tmp/InfernoUSBRemote')
 
+# Current Inferno shortened the T8030 machine property names. The historical
+# qemu-t8030 command line used *-filename, which modern Inferno rejects before
+# the iPhone kernel can start.
+trustcache_refs = s.count('trustcache-filename=')
+ticket_refs = s.count('ticket-filename=')
+if trustcache_refs != 2 or ticket_refs != 2:
+    raise SystemExit(
+        f"T8030 machine properties: expected 2 trustcache and 2 ticket refs, "
+        f"found {trustcache_refs} and {ticket_refs}"
+    )
+s = s.replace('trustcache-filename=', 'trustcache=')
+s = s.replace('ticket-filename=', 'ticket=')
+
 replace_once(
     "  -display none -nographic \\\n",
     "  -display none \\\n",
