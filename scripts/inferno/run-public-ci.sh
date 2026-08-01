@@ -16,6 +16,7 @@ src = Path(sys.argv[1])
 out = Path(sys.argv[2])
 s = src.read_text()
 
+
 def replace_once(old: str, new: str, label: str) -> None:
     global s
     count = s.count(old)
@@ -23,8 +24,7 @@ def replace_once(old: str, new: str, label: str) -> None:
         raise SystemExit(f"{label}: expected one match, found {count}")
     s = s.replace(old, new, 1)
 
-# The executable copy lives under RUNNER_TEMP, so resolve repository assets from
-# the explicit checkout path rather than from $0.
+
 replace_once(
     '''SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"''',
@@ -38,12 +38,8 @@ replace_once(
     "pip mode",
 )
 
-# Inferno's ROM submodules are firmware build inputs for many unrelated QEMU
-# targets. The Apple ARM emulator build only needs the mlib helper. Inferno also
-# hardcodes data encryption on, while its simulated SEP explicitly requires it
-# off. Disable that single source configuration before compilation. Preserve
-# the mandatory public branding image and QEMU VNC keymaps in the relocated
-# runtime share tree before the source checkout is removed.
+# Build only the Inferno pieces needed here, select simulated SEP, and retain
+# runtime data required by the relocated executable.
 replace_once(
     "  git clone --depth 1 --recurse-submodules --shallow-submodules \\\n"
     "    https://github.com/ChefKissInc/Inferno.git \"$INFERNO_SRC\"",
@@ -61,11 +57,9 @@ replace_once(
     "  sed -i.bak 's/^#define ENABLE_DATA_ENCRYPTION$/\\/\\/ #define ENABLE_DATA_ENCRYPTION/' \"$SEP_BOOT_HEADER\"\n"
     "  rm -f \"$SEP_BOOT_HEADER.bak\"\n"
     "  if grep -q '^#define ENABLE_DATA_ENCRYPTION$' \"$SEP_BOOT_HEADER\"; then fail 'Could not enable Inferno simulated SEP'; fi",
-    "minimal Inferno clone, simulated SEP, branding, and VNC keymaps",
+    "minimal Inferno clone, simulated SEP, and runtime data",
 )
 
-# Inferno intentionally leaves the macOS executable unsigned and gives it an
-# -unsigned suffix. Accept either upstream output name.
 replace_once(
     '  cp "$INFERNO_SRC/build/qemu-system-aarch64" "$QEMU"',
     '''  QEMU_SOURCE="$INFERNO_SRC/build/qemu-system-aarch64"
@@ -77,7 +71,6 @@ replace_once(
     "Inferno executable name",
 )
 
-# The Linux companion needs ARM UEFI, not Inferno's huge EDK2 source tree.
 old_uefi = '''  UEFI_SOURCE="$(find "$INFERNO_SRC" -type f \\( -name 'edk2-aarch64-code.fd' -o -name 'edk2-aarch64-code.fd.bz2' \\) | head -n1)"
   [ -n "$UEFI_SOURCE" ] || fail 'Inferno build did not provide ARM UEFI firmware'
   case "$UEFI_SOURCE" in
@@ -93,9 +86,6 @@ new_uefi = '''  QEMU_SHARE="$(brew --prefix qemu)/share/qemu"
   esac'''
 replace_once(old_uefi, new_uefi, "packaged ARM UEFI")
 
-# The companion boots from its virtio disk and never performs PXE. Inferno is
-# copied out of its build tree, so disabling option ROM lookup avoids requiring
-# efi-virtio.rom beside the executable.
 replace_once(
     '  -device virtio-blk-pci,drive=companion-os \\\n',
     '  -device virtio-blk-pci,drive=companion-os,romfile= \\\n',
@@ -107,13 +97,31 @@ replace_once(
     "companion network option ROM",
 )
 
-# The ARM companion used to compile its entire restore stack while the iPhone
-# was already booting. Under full TCG that starved USB control transfers and
-# caused Linux descriptor timeouts. Wait for its explicit ready marker before
-# launching the iPhone VM.
+# Follow Inferno's documented companion configuration: USB 2 EHCI with an
+# explicit loopback TCP transport. This avoids the xHCI descriptor timeout seen
+# with the default UNIX-socket setup under full TCG.
 replace_once(
-    "[ -S /tmp/usbqemu ] || fail 'Linux companion did not create /tmp/usbqemu'\n\nIOS_COMMON_DRIVES=(",
-    """[ -S /tmp/usbqemu ] || fail 'Linux companion did not create /tmp/usbqemu'
+    '''  -device qemu-xhci,id=xhci \\
+  -device usb-tcp-remote,bus=xhci.0 \\''',
+    '''  -usb \\
+  -device usb-ehci,id=ehci \\
+  -device usb-tcp-remote,bus=ehci.0,conn-type=ipv4,conn-addr=127.0.0.1,conn-port=8030 \\''',
+    "documented EHCI TCP companion transport",
+)
+
+# Wait for the companion's full restore stack, not a transport socket, before
+# allowing iOS to expose its recovery USB device.
+replace_once(
+    '''for attempt in $(seq 1 180); do
+  kill -0 "$COMPANION_PID" 2>/dev/null || fail 'Linux USB companion exited early'
+  [ -S /tmp/usbqemu ] && break
+  sleep 2
+done
+[ -S /tmp/usbqemu ] || fail 'Linux companion did not create /tmp/usbqemu'
+
+IOS_COMMON_DRIVES=(''',
+    '''sleep 2
+kill -0 "$COMPANION_PID" 2>/dev/null || fail 'Linux USB companion exited early'
 
 TOOLS_DEADLINE=$(( $(date +%s) + 1800 ))
 while (( $(date +%s) < TOOLS_DEADLINE )); do
@@ -125,22 +133,12 @@ while (( $(date +%s) < TOOLS_DEADLINE )); do
 done
 [ -f "$SHARE/restore-tools.ready" ] || fail 'Timed out waiting for ARM restore tools'
 
-echo "$(date -u +%FT%TZ) restore tools ready; launching iPhone recovery environment"
+echo "$(date -u +%FT%TZ) restore tools ready; launching iPhone recovery environment over EHCI/TCP"
 
-IOS_COMMON_DRIVES=(""",
+IOS_COMMON_DRIVES=(''',
     "companion restore-tool readiness",
 )
 
-# usb-tcp-remote reports this as its default path. Use the actual upstream
-# default consistently instead of waiting on the obsolete qemu-t8030 path.
-socket_refs = s.count('/tmp/usbqemu')
-if socket_refs < 2:
-    raise SystemExit(f"USB socket path: expected at least two matches, found {socket_refs}")
-s = s.replace('/tmp/usbqemu', '/tmp/InfernoUSBRemote')
-
-# Current Inferno shortened the T8030 machine property names. The historical
-# qemu-t8030 command line used *-filename, which modern Inferno rejects before
-# the iPhone kernel can start.
 trustcache_refs = s.count('trustcache-filename=')
 ticket_refs = s.count('ticket-filename=')
 if trustcache_refs != 2 or ticket_refs != 2:
@@ -151,8 +149,14 @@ if trustcache_refs != 2 or ticket_refs != 2:
 s = s.replace('trustcache-filename=', 'trustcache=')
 s = s.replace('ticket-filename=', 'ticket=')
 
-# Modern Inferno's explicit recovery mode is named enter_recovery. The old
-# qemu-t8030 value manual is rejected by the property setter.
+machine_refs = s.count('-M "t8030,')
+if machine_refs != 2:
+    raise SystemExit(f"T8030 USB transport: expected two machine launches, found {machine_refs}")
+s = s.replace(
+    '-M "t8030,',
+    '-M "t8030,usb-conn-type=ipv4,usb-conn-addr=127.0.0.1,usb-conn-port=8030,',
+)
+
 replace_once(
     'boot-mode=manual',
     'boot-mode=enter_recovery',
@@ -165,14 +169,13 @@ replace_once(
     "companion display flags",
 )
 
-# Preserve Apple's restore launch daemons. The installer daemon is additive.
 replace_once(
     'sudo rm -f "$RAMDISK_MOUNT/System/Library/LaunchDaemons/"*.plist\n',
     '',
     "restore launch daemons",
 )
 
-# Bound monitor connections so a stopped QEMU process cannot hang the job.
+# Bound monitor connections so stopped QEMU processes cannot hang the job.
 s = s.replace(
     "printf 'quit\\\\n' | nc 127.0.0.1 1235",
     "printf 'quit\\n' | nc -w 2 127.0.0.1 1235",
