@@ -15,6 +15,19 @@ fail() {
   exit 1
 }
 
+record_unhandled_error() {
+  local rc=$?
+  trap - ERR
+  set +e
+  echo "COMPANION_UNHANDLED_ERROR=$rc"
+  if mountpoint -q "$HOST_SHARE" 2>/dev/null; then
+    printf '%s\n' "$rc" > "$HOST_SHARE/restore.exit"
+    touch "$HOST_SHARE/restore.failed"
+  fi
+  exit "$rc"
+}
+trap record_unhandled_error ERR
+
 export DEBIAN_FRONTEND=noninteractive
 
 for attempt in $(seq 1 60); do
@@ -44,8 +57,23 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 cd "$WORK"
 
+# Current libirecovery separates common socket/thread helpers into the public
+# libimobiledevice-glue project. Build that first because Ubuntu Noble's base
+# repositories do not provide the needed development metadata here.
+git clone --depth 1 https://github.com/libimobiledevice/libimobiledevice-glue.git
+cd libimobiledevice-glue
+./autogen.sh --prefix=/usr/local
+make -j2
+make install
+ldconfig
+
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+pkg-config --exists 'libimobiledevice-glue-1.0 >= 1.0.0' || \
+  fail 'libimobiledevice-glue pkg-config metadata was not installed'
+
 # Ubuntu Noble ARM64 does not publish libirecovery-dev. Build the public
 # libirecovery generation used by the original T8030 restore flow.
+cd "$WORK"
 git clone --depth 200 https://github.com/libimobiledevice/libirecovery.git
 cd libirecovery
 LIBIRECOVERY_COMMIT="$(git rev-list -n 1 --before='2022-03-10 00:00:00 UTC' HEAD)"
@@ -94,8 +122,7 @@ p.write_text(s)
 PY
 fi
 
-PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-} \
-  ./autogen.sh --prefix=/usr/local
+./autogen.sh --prefix=/usr/local
 make -j2
 make install
 ldconfig
