@@ -195,6 +195,28 @@ cd usbmuxd
 USBMUXD_COMMIT="$(git rev-list -n 1 --before='2022-03-10 00:00:00 UTC' HEAD)"
 [ -n "$USBMUXD_COMMIT" ] && git checkout "$USBMUXD_COMMIT"
 git apply --3way "$HOST_SHARE/usbmuxd.patch" || true
+
+# libplist renamed its file helpers and added format/options output arguments.
+# Adapt the historical usbmuxd source instead of downgrading system libraries.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path('src/conf.c')
+s = p.read_text()
+replacements = {
+    'plist_read_from_filename(&config, config_file);':
+        'plist_read_from_file(config_file, &config, NULL);',
+    'plist_write_to_filename(config, config_file, PLIST_FORMAT_XML)':
+        'plist_write_to_file(config, config_file, PLIST_FORMAT_XML, PLIST_OPT_NONE)',
+}
+for old, new in replacements.items():
+    if old in s:
+        s = s.replace(old, new)
+    elif new not in s:
+        raise SystemExit(f'usbmuxd libplist compatibility call not found: {old}')
+p.write_text(s)
+PY
+
 ./autogen.sh --prefix=/usr/local --without-systemd
 make -j2
 make install
@@ -202,6 +224,14 @@ ldconfig
 
 /usr/local/sbin/usbmuxd -f -v > "$HOST_SHARE/usbmuxd.log" 2>&1 &
 echo $! > "$HOST_SHARE/usbmuxd.pid"
+
+# Do not boot the iPhone while the ARM companion is compiling. Full TCG makes
+# USB control transfers slow enough to exceed Linux's default descriptor timer.
+if [ -w /sys/module/usbcore/parameters/initial_descriptor_timeout ]; then
+  echo 60000 > /sys/module/usbcore/parameters/initial_descriptor_timeout || true
+fi
+touch "$HOST_SHARE/restore-tools.ready"
+echo "$(date -u +%FT%TZ) restore tools ready; waiting for emulated iPhone USB"
 
 # Wait for the emulated iPhone to enter restore mode.
 DEVICE_READY=0
