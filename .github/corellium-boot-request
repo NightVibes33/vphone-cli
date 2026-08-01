@@ -1,0 +1,5 @@
+requested_at=2026-08-01T19:00:00Z
+instance_name=github-jailbroken-iphone
+device_flavor=iphone16pm
+ios_version=18.0
+cleanup_mode=keep-running
