@@ -1,0 +1,48 @@
+name: VPhone iOS native IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-native-ipa.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/project.yml --project ios/VPhoneiOS.xcodeproj
+      - name: Compile for physical iPhone
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/VPhoneiOS.xcodeproj \
+            -scheme VPhoneiOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/vphone-ios-build" \
+            CODE_SIGNING_ALLOWED=NO build | tee "$RUNNER_TEMP/vphone-ios-build.log"
+      - name: Package unsigned SideStore IPA
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/vphone-ios-build/Build/Products/Release-iphoneos/VPhoneiOS.app"
+          test -f "$APP/VPhoneiOS"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/VPhoneiOS-unsigned.ipa" Payload)
+          unzip -t VPhoneiOS-unsigned.ipa | tail -n 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VPhoneiOS-unsigned-IPA
+          path: VPhoneiOS-unsigned.ipa
+          retention-days: 14
