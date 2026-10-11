@@ -13,6 +13,13 @@ final class ExternalVMBundle: ObservableObject {
     @Published private(set) var firmwareVersion = "Unknown"
     private var bookmarked: Data?
     private var activeURL: URL?
+    private var acquiredAccess = false
+
+    var isDiskAccessible: Bool {
+        guard let activeURL, let diskPath else { return false }
+        return FileManager.default.isReadableFile(atPath: activeURL.appendingPathComponent("config.plist").path)
+            && FileManager.default.isReadableFile(atPath: diskPath)
+    }
 
     init() {
         bookmarked = UserDefaults.standard.data(forKey: "vphone.usb.folder.bookmark")
@@ -56,12 +63,14 @@ final class ExternalVMBundle: ObservableObject {
             return nil
         }
         activeURL = url
+        acquiredAccess = true
         return url
     }
 
     func endAccess() {
-        activeURL?.stopAccessingSecurityScopedResource()
+        if acquiredAccess { activeURL?.stopAccessingSecurityScopedResource() }
         activeURL = nil
+        acquiredAccess = false
     }
 }
 

@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 import CoreVideo
 import CoreGraphics
+import CoreImage
 
 @MainActor
 final class VPhoneHost: ObservableObject {
@@ -30,6 +31,8 @@ final class VPhoneHost: ObservableObject {
     private var events: [String] = []
     private var frameTimer: Timer?
     private var guestConnectTask: Task<Void, Never>?
+    private var usbMonitorTask: Task<Void, Never>?
+    @Published private(set) var storageStatus = "No disk selected"
     private var screenshotInFlight = false
     private var screenshotCount = 0
     @Published private(set) var guestFrameStatus = "No guest framebuffer yet"
@@ -43,6 +46,7 @@ final class VPhoneHost: ObservableObject {
             try usb.select(url)
             state = .idle
             detail = "VPhone bundle: \(usb.bundleSummary). Disk remains on external storage."
+            storageStatus = "VM disk selected · direct USB access"
             record("USB VM bundle opened: \(url.lastPathComponent)")
         } catch {
             state = .failed
@@ -110,13 +114,16 @@ final class VPhoneHost: ObservableObject {
                     self.detail = "Native VM started; awaiting actual guest boot frames."
                     self.startCapturingGuestFrames()
                     self.connectGuestDaemon()
+                    self.monitorExternalStorage()
                 }
                 self.record(self.detail)
             }
         }
     }
 
-    func stop() {
+    func stop(reason: String? = nil) {
+        usbMonitorTask?.cancel()
+        usbMonitorTask = nil
         frameTimer?.invalidate()
         frameTimer = nil
         guestConnectTask?.cancel()
@@ -127,13 +134,71 @@ final class VPhoneHost: ObservableObject {
                 guard let self else { return }
                 self.usb.endAccess()
                 self.state = .stopped
-                self.detail = error?.localizedDescription ?? "VM stopped"
+                self.detail = reason ?? error?.localizedDescription ?? "VM stopped"
                 self.record(self.detail)
             }
         }
     }
 
 
+
+    enum HardwareKey: String, CaseIterable {
+        case home = "Home"
+        case power = "Power"
+        case volumeUp = "Volume +"
+        case volumeDown = "Volume −"
+
+        var usage: UInt32 {
+            switch self {
+            case .home: return 0x40
+            case .power: return 0x30
+            case .volumeUp: return 0xE9
+            case .volumeDown: return 0xEA
+            }
+        }
+    }
+
+    func sendHardwareKey(_ key: HardwareKey) {
+        guard state == .running else { return }
+        if !native.sendHIDPress(withPage: 0x0C, usage: key.usage) {
+            guestControlStatus = "Hardware keys require connected vphoned"
+        }
+    }
+
+    func exportGuestScreenshot() -> URL? {
+        guard let buffer = frames.currentFrame() else {
+            guestFrameStatus = "No real guest framebuffer to export"
+            return nil
+        }
+        let ci = CIImage(cvPixelBuffer: buffer)
+        let context = CIContext()
+        guard let image = context.createCGImage(ci, from: ci.extent),
+              let bytes = UIImage(cgImage: image).pngData() else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("VPhone-guest-screen.png")
+        do {
+            try bytes.write(to: url, options: .atomic)
+            return url
+        } catch {
+            record("Failed to export guest screenshot: \(error)")
+            return nil
+        }
+    }
+
+    private func monitorExternalStorage() {
+        usbMonitorTask?.cancel()
+        usbMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, self.state == .running, !Task.isCancelled else { return }
+                guard self.usb.isDiskAccessible else {
+                    self.storageStatus = "USB disconnected — stopping guest to prevent additional writes"
+                    self.record(self.storageStatus)
+                    self.stop(reason: "External VM disk disconnected. Reconnect USB and reselect the folder before booting again.")
+                    return
+                }
+            }
+        }
+    }
 
     func sendGuestTouch(phase: Int, x: Double, y: Double) {
         guard state == .running else { return }
@@ -223,6 +288,9 @@ final class VPhoneHost: ObservableObject {
         \(events.joined(separator: "\n"))
         Guest frames: \(screenshotCount)
         Guest RPC: \(guestControlStatus)
+        Guest serial tail:
+        \(native.serialLogSnapshot())
+        External storage: \(storageStatus)
         Firmware: \(usb.bundleSummary)
         GPU: \(capabilities.metal)
         JIT: \(capabilities.jit)

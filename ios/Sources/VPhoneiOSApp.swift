@@ -19,7 +19,8 @@ struct VPhoneHome: View {
     @EnvironmentObject private var host: VPhoneHost
     @State private var importingFolder = false
     @State private var importingPairing = false
-    @State private var importingFirmware = false
+    @State private var shareGuestScreenshot = false
+    @State private var screenshotURL: URL?
     @State private var showDiagnostics = false
 
     var body: some View {
@@ -59,6 +60,16 @@ struct VPhoneHome: View {
                         }
                     }
 
+                    HStack(spacing: 6) {
+                        ForEach(VPhoneHost.HardwareKey.allCases, id: \.self) { key in
+                            Button(key.rawValue) { host.sendHardwareKey(key) }
+                                .buttonStyle(.bordered)
+                                .font(.caption2)
+                                .disabled(host.state != .running)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+
                     HStack(spacing: 10) {
                         Button {
                             host.start()
@@ -78,6 +89,7 @@ struct VPhoneHome: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Button("Select VM folder on USB") { importingFolder = true }
                                 .buttonStyle(.bordered)
+                            Text(host.storageStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
                             Text("Select a prepared upstream vphone bundle with iBoot ROM, SEP ROM, NVRAM, Disk.img and config.plist. The real disk is read from USB in place.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -116,7 +128,14 @@ struct VPhoneHome: View {
                         .font(.footnote.monospaced())
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    Button("Export diagnostics") { showDiagnostics = true }
+                    Button("Save real guest screenshot") {
+                        screenshotURL = host.exportGuestScreenshot()
+                        shareGuestScreenshot = screenshotURL != nil
+                    }
+                    .font(.footnote)
+                    .disabled(host.state != .running)
+
+                    Button("Export diagnostics and guest serial log") { showDiagnostics = true }
                         .font(.footnote)
                 }
                 .padding()
@@ -124,6 +143,11 @@ struct VPhoneHome: View {
             .navigationTitle("VPhone")
             .sheet(isPresented: $showDiagnostics) {
                 ShareSheet(items: [host.exportDiagnostics()])
+            }
+            .sheet(isPresented: $shareGuestScreenshot) {
+                if let screenshotURL {
+                    ShareSheet(items: [screenshotURL])
+                }
             }
             .fileImporter(isPresented: $importingFolder, allowedContentTypes: [.folder]) { result in
                 host.selectUSB(result)

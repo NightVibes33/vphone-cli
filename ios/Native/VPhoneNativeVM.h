@@ -6,6 +6,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)prepareWithBundleURL:(NSURL *)url error:(NSError * _Nullable * _Nullable)error;
 - (void)startWithCompletion:(void (^)(NSError * _Nullable))completion;
 - (void)connectGuestControlWithCompletion:(void (^)(NSString *status))completion;
+- (BOOL)sendHIDPressWithPage:(uint32_t)page usage:(uint32_t)usage;
+- (NSString *)serialLogSnapshot;
 - (BOOL)sendTouchWithPhase:(NSInteger)phase x:(double)x y:(double)y;
 - (void)captureRealFrameWithCompletion:(void (^)(UIImage * _Nullable image))completion;
 - (void)stopWithCompletion:(void (^)(NSError * _Nullable))completion;

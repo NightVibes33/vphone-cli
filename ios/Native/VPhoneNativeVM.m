@@ -41,6 +41,7 @@ static id Get(id target, NSString *key) {
 @property (nonatomic, assign) BOOL guestControlReady;
 @property (nonatomic, strong) NSPipe *serialInput;
 @property (nonatomic, strong) NSPipe *serialOutput;
+@property (nonatomic, strong) NSMutableString *serialBuffer;
 @end
 
 @implementation VPhoneNativeVM
@@ -60,6 +61,10 @@ static id Get(id target, NSString *key) {
     self.guestSocketConnection = nil;
     self.guestControlFD = -1;
     self.guestControlReady = NO;
+    self.serialOutput.fileHandleForReading.readabilityHandler = nil;
+    self.serialInput = nil;
+    self.serialOutput = nil;
+    self.serialBuffer = [NSMutableString string];
     NSDictionary *manifest = [NSDictionary dictionaryWithContentsOfURL:
                               [bundleURL URLByAppendingPathComponent:@"config.plist"]];
     if (!manifest) {
@@ -267,6 +272,25 @@ static id Get(id target, NSString *key) {
                 self.serialInput.fileHandleForReading, self.serialOutput.fileHandleForWriting);
             if (attachment && Set(serial, @"attachment", attachment)) {
                 Set(config, @"serialPorts", @[serial]);
+                __weak typeof(self) weakSelf = self;
+                self.serialOutput.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+                    NSData *bytes = handle.availableData;
+                    if (!bytes.length) {
+                        handle.readabilityHandler = nil;
+                        return;
+                    }
+                    NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
+                    if (!text) text = [[NSString alloc] initWithData:bytes encoding:NSISOLatin1StringEncoding];
+                    if (!text) return;
+                    typeof(self) strongSelf = weakSelf;
+                    if (!strongSelf) return;
+                    @synchronized (strongSelf) {
+                        [strongSelf.serialBuffer appendString:text];
+                        if (strongSelf.serialBuffer.length > 600000) {
+                            [strongSelf.serialBuffer deleteCharactersInRange:NSMakeRange(0, 150000)];
+                        }
+                    }
+                };
             }
         }
 
@@ -447,6 +471,19 @@ static id Get(id target, NSString *key) {
         completion(e.reason ?: @"Guest VSOCK connection failed");
     }
 }
+- (NSString *)serialLogSnapshot {
+    @synchronized(self) {
+        return [self.serialBuffer copy] ?: @"";
+    }
+}
+- (BOOL)sendHIDPressWithPage:(uint32_t)page usage:(uint32_t)usage {
+    if (!self.guestControlReady || self.guestControlFD < 0) return NO;
+    // Exact vphoned HID command format, identical to upstream VPhoneKeyHelper.
+    return [self sendGuestMessage:@{@"v": @1, @"t": @"hid",
+                                    @"id": NSUUID.UUID.UUIDString,
+                                    @"page": @(page), @"usage": @(usage)}];
+}
+
 - (BOOL)sendTouchWithPhase:(NSInteger)phase x:(double)x y:(double)y {
     if (!self.guestControlReady || self.guestControlFD < 0) return NO;
     return [self sendGuestMessage:@{@"v": @1, @"t": @"touch",
@@ -460,6 +497,7 @@ static id Get(id target, NSString *key) {
     self.guestControlReady = NO;
     self.guestControlFD = -1;
     self.guestSocketConnection = nil;
+    self.serialOutput.fileHandleForReading.readabilityHandler = nil;
     if (!self.virtualMachine) { completion(nil); return; }
     SEL sel = NSSelectorFromString(@"stopWithCompletionHandler:");
     @try {
