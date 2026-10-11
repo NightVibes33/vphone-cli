@@ -17,6 +17,9 @@ struct VPhoneiOSApp: App {
 
 struct VPhoneHome: View {
     @EnvironmentObject private var host: VPhoneHost
+    @StateObject private var firmware = VPhoneFirmwareStager()
+    @State private var importingFirmwareFolder = false
+    @State private var firmwareKind: VPhoneFirmwareStager.Kind = .ios
     @State private var importingFolder = false
     @State private var importingPairing = false
     @State private var shareGuestScreenshot = false
@@ -97,6 +100,40 @@ struct VPhoneHome: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
+                    GroupBox("iOS 27 firmware · stream to USB") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("iOS build", selection: $firmware.selection) {
+                                ForEach(firmware.pairings.indices, id: \.self) { i in
+                                    Text(firmware.pairings[i].iosName).tag(i)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            HStack {
+                                Button("Save iOS IPSW") {
+                                    firmwareKind = .ios
+                                    importingFirmwareFolder = true
+                                }
+                                .disabled(firmware.isDownloading || firmware.pairings.isEmpty)
+                                Button("Save cloudOS") {
+                                    firmwareKind = .cloudOS
+                                    importingFirmwareFolder = true
+                                }
+                                .disabled(firmware.isDownloading || firmware.pairings.isEmpty)
+                                if firmware.isDownloading {
+                                    Button("Cancel") { firmware.cancel() }
+                                }
+                            }
+                            if firmware.isDownloading {
+                                ProgressView(value: firmware.progress)
+                            }
+                            Text(firmware.status).font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Text("Downloads the original upstream Apple firmware archives to USB without a full copy in iPhone storage. Firmware patching and DFU restore are separate operations.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+
                     GroupBox("LocalDevVPN and pairing") {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -147,6 +184,14 @@ struct VPhoneHome: View {
             .sheet(isPresented: $shareGuestScreenshot) {
                 if let screenshotURL {
                     ShareSheet(items: [screenshotURL])
+                }
+            }
+            .fileImporter(isPresented: $importingFirmwareFolder, allowedContentTypes: [.folder]) { result in
+                switch result {
+                case .success(let folder):
+                    firmware.download(firmwareKind, folder: folder)
+                case .failure(_):
+                    break
                 }
             }
             .fileImporter(isPresented: $importingFolder, allowedContentTypes: [.folder]) { result in
