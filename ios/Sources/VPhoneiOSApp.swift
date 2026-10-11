@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 @main
@@ -47,6 +48,8 @@ struct VPhoneHome: View {
                             .font(.footnote.monospaced())
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                        Text(host.guestFrameStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Text(host.usb.firmwareVersion).font(.caption.monospaced()).foregroundStyle(.secondary)
                         if let path = host.usb.diskPath {
                             Label(path, systemImage: "externaldrive")
                                 .font(.caption2.monospaced())
@@ -74,7 +77,7 @@ struct VPhoneHome: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Button("Select VM folder on USB") { importingFolder = true }
                                 .buttonStyle(.bordered)
-                            Text("Open the VM folder containing config.plist and Disk.img. Uses a security-scoped URL; no game or OS disk is copied into the IPA.")
+                            Text("Select a prepared upstream vphone bundle with iBoot ROM, SEP ROM, NVRAM, Disk.img and config.plist. The real disk is read from USB in place.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -127,7 +130,7 @@ struct VPhoneHome: View {
             .fileImporter(isPresented: $importingPairing, allowedContentTypes: [.data]) { result in
                 host.selectPairing(result)
             }
-            .fileImporter(isPresented: $importingFirmware, allowedContentTypes: [.data]) { _ in }
+
         }
     }
 }

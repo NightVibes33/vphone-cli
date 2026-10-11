@@ -17,6 +17,12 @@ targets:
     sources:
       - path: Sources
       - path: Native
+      - path: ../sources/VPhoneCore/VPhoneVirtualMachineManifest.swift
+      - path: ../sources/VPhoneCore/VPhoneBundle.swift
+      - path: ../sources/VPhoneCore/VPhoneRestoreInfo.swift
+      - path: ../sources/VPhoneCore/VPhoneBundleReport.swift
+      - path: ../sources/VPhoneCore/VPhoneFirmwareCatalog.swift
+      - path: ../sources/VPhoneCore/VPhoneBootPatterns.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nightvibes33.vphoneios

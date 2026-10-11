@@ -4,11 +4,17 @@ import CoreImage
 import CoreVideo
 
 // A real CVPixelBuffer from the guest is required: never paint a fake SpringBoard.
-@MainActor
-final class GuestFrameStore: ObservableObject {
+final class GuestFrameStore: @unchecked Sendable {
+    private let lock = NSLock()
     private var latestFrame: CVPixelBuffer?
-    func submitGuestFrame(_ buffer: CVPixelBuffer) { latestFrame = buffer }
-    func currentFrame() -> CVPixelBuffer? { latestFrame }
+    func submitGuestFrame(_ buffer: CVPixelBuffer) {
+        lock.lock(); defer { lock.unlock() }
+        latestFrame = buffer
+    }
+    func currentFrame() -> CVPixelBuffer? {
+        lock.lock(); defer { lock.unlock() }
+        return latestFrame
+    }
 }
 
 struct MetalGuestView: UIViewRepresentable {
@@ -38,7 +44,7 @@ final class MetalFrameRenderer: NSObject, MTKViewDelegate {
     private let context: CIContext?
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
 
-    @MainActor init(frames: GuestFrameStore) {
+    init(frames: GuestFrameStore) {
         self.frames = frames
         if let device = MTLCreateSystemDefaultDevice() {
             self.queue = device.makeCommandQueue()
@@ -55,7 +61,7 @@ final class MetalFrameRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         guard let drawable = view.currentDrawable,
               let commandBuffer = queue?.makeCommandBuffer() else { return }
-        let buffer = MainActor.assumeIsolated { frames.currentFrame() }
+        let buffer = frames.currentFrame()
         if let buffer, let context {
             let image = CIImage(cvPixelBuffer: buffer)
             let original = image.extent

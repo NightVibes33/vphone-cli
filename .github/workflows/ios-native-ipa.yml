@@ -3,7 +3,7 @@ name: VPhone iOS native IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, ios27-native-integration]
     paths:
       - 'ios/**'
       - '.github/workflows/ios-native-ipa.yml'
@@ -20,7 +20,12 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
-        run: xcodegen generate --spec ios/project.yml --project ios/VPhoneiOS.xcodeproj
+        run: xcodegen generate --spec ios/project.yml --project ios
+      - name: Verify original VPhoneCore files are wired
+        run: |
+          grep -q 'VPhoneVirtualMachineManifest.swift' ios/project.yml
+          grep -q 'VPhoneRestoreInfo.swift' ios/project.yml
+          grep -q 'VPhoneFirmwareCatalog.swift' ios/project.yml
       - name: Compile for physical iPhone
         run: |
           set -euo pipefail

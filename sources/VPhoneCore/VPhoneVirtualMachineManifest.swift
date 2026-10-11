@@ -1,5 +1,7 @@
 import Foundation
+#if os(macOS)
 import Virtualization
+#endif
 
 // MARK: - Errors
 
@@ -209,10 +211,12 @@ public struct VPhoneVirtualMachineManifest: Codable, Sendable {
         vmDirectory.appendingPathComponent(path)
     }
 
-    /// Get VZMacMachineIdentifier from manifest data
+#if os(macOS)
+    /// macOS VM-only conversion. The Codable manifest itself is shared with iOS.
     public func vzMachineIdentifier() -> VZMacMachineIdentifier? {
         VZMacMachineIdentifier(dataRepresentation: machineIdentifier)
     }
+#endif
 
     // MARK: - Editing
 

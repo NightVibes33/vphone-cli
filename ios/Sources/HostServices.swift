@@ -9,6 +9,8 @@ import UniformTypeIdentifiers
 @MainActor
 final class ExternalVMBundle: ObservableObject {
     @Published private(set) var diskPath: String?
+    @Published private(set) var bundleSummary = "No VM selected"
+    @Published private(set) var firmwareVersion = "Unknown"
     private var bookmarked: Data?
     private var activeURL: URL?
 
@@ -26,9 +28,9 @@ final class ExternalVMBundle: ObservableObject {
         let granted = url.startAccessingSecurityScopedResource()
         defer { if granted { url.stopAccessingSecurityScopedResource() } }
         let config = url.appendingPathComponent("config.plist")
-        let data = try Data(contentsOf: config)
-        let root = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-        let image = (root?["diskImage"] as? String) ?? "Disk.img"
+        let bundle = try VPhoneBundle.load(at: url)
+        let image = bundle.manifest.diskImage
+        let restored = VPhoneRestoreInfo.load(fromBundle: bundle)
         guard !image.contains(".."), !image.hasPrefix("/") else {
             throw VPhoneStorageError.invalidImagePath
         }
@@ -40,6 +42,8 @@ final class ExternalVMBundle: ObservableObject {
         bookmarked = bookmark
         UserDefaults.standard.set(bookmark, forKey: "vphone.usb.folder.bookmark")
         diskPath = disk.path
+        firmwareVersion = restored.map { "iOS \($0.ios.version) (\($0.ios.build)) + cloudOS \($0.cloudOS.version)" } ?? "Firmware restore information not recorded"
+        bundleSummary = "\(bundle.name) · \(bundle.manifest.cpuCount) CPU · \(bundle.manifest.memorySize / (1024 * 1024)) MB · \(firmwareVersion)"
     }
 
     func beginAccess() -> URL? {
