@@ -86,12 +86,12 @@ final class VPhoneHost: ObservableObject {
         state = .starting
         detail = "Creating native PV=3 VM with upstream VPhone firmware/SEP/NVRAM."
         record("VM create requested; storage = external in-place")
-        var error: NSError?
-        let created = native.prepare(withBundleURL: bundleURL, error: &error)
-        if !created {
+        do {
+            try native.prepare(withBundleURL: bundleURL)
+        } catch {
             usb.endAccess()
             state = .failed
-            detail = "Native VM creation failed: \(error?.localizedDescription ?? "unknown failure")"
+            detail = "Native VM creation failed: \(error.localizedDescription)"
             record(detail)
             return
         }
@@ -132,18 +132,20 @@ final class VPhoneHost: ObservableObject {
         frameTimer?.invalidate()
         screenshotInFlight = false
         frameTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15, repeats: true) { [weak self] _ in
-            guard let self, self.state == .running, !self.screenshotInFlight else { return }
-            self.screenshotInFlight = true
-            self.native.captureRealFrame { [weak self] image in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.screenshotInFlight = false
-                    guard self.state == .running, let image,
-                          let buffer = Self.makeBuffer(image) else { return }
-                    self.frames.submitGuestFrame(buffer)
-                    self.screenshotCount += 1
-                    if self.screenshotCount % 30 == 1 {
-                        self.guestFrameStatus = "Real guest frames received: \(self.screenshotCount)"
+            Task { @MainActor in
+                guard let self, self.state == .running, !self.screenshotInFlight else { return }
+                self.screenshotInFlight = true
+                self.native.captureRealFrame { [weak self] image in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.screenshotInFlight = false
+                        guard self.state == .running, let image,
+                              let buffer = Self.makeBuffer(image) else { return }
+                        self.frames.submitGuestFrame(buffer)
+                        self.screenshotCount += 1
+                        if self.screenshotCount % 30 == 1 {
+                            self.guestFrameStatus = "Real guest frames received: \(self.screenshotCount)"
+                        }
                     }
                 }
             }

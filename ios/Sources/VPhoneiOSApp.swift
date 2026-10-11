@@ -87,10 +87,10 @@ struct VPhoneHome: View {
                     GroupBox("LocalDevVPN and pairing") {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                TextField("Tunnel host", text: $host.tunnel.host)
+                                TextField("Tunnel host", text: Binding(get: { host.tunnel.host }, set: { host.tunnel.host = $0 }))
                                     .textInputAutocapitalization(.never)
                                     .keyboardType(.numbersAndPunctuation)
-                                TextField("Port", text: $host.tunnel.port)
+                                TextField("Port", text: Binding(get: { host.tunnel.port }, set: { host.tunnel.port = $0 }))
                                     .keyboardType(.numberPad)
                                     .frame(width: 80)
                             }

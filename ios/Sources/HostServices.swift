@@ -27,7 +27,6 @@ final class ExternalVMBundle: ObservableObject {
     func select(_ url: URL) throws {
         let granted = url.startAccessingSecurityScopedResource()
         defer { if granted { url.stopAccessingSecurityScopedResource() } }
-        let config = url.appendingPathComponent("config.plist")
         let bundle = try VPhoneBundle.load(at: url)
         let image = bundle.manifest.diskImage
         let restored = VPhoneRestoreInfo.load(fromBundle: bundle)
