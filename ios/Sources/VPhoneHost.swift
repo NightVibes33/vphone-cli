@@ -33,6 +33,7 @@ final class VPhoneHost: ObservableObject {
     private var screenshotInFlight = false
     private var screenshotCount = 0
     @Published private(set) var guestFrameStatus = "No guest framebuffer yet"
+    @Published private(set) var guestControlStatus = "vphoned not connected"
 
     init() { record("App started · \(ProcessInfo.processInfo.operatingSystemVersionString)") }
 
@@ -108,6 +109,7 @@ final class VPhoneHost: ObservableObject {
                     self.state = .running
                     self.detail = "Native VM started; awaiting actual guest boot frames."
                     self.startCapturingGuestFrames()
+                    self.connectGuestDaemon()
                 }
                 self.record(self.detail)
             }
@@ -117,6 +119,9 @@ final class VPhoneHost: ObservableObject {
     func stop() {
         frameTimer?.invalidate()
         frameTimer = nil
+        guestConnectTask?.cancel()
+        guestConnectTask = nil
+        guestControlStatus = "vphoned disconnected"
         native.stop { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
@@ -128,6 +133,34 @@ final class VPhoneHost: ObservableObject {
         }
     }
 
+
+
+    func sendGuestTouch(phase: Int, x: Double, y: Double) {
+        guard state == .running else { return }
+        _ = native.sendTouch(withPhase: phase, x: x, y: y)
+    }
+
+    private func connectGuestDaemon() {
+        guestConnectTask?.cancel()
+        guestConnectTask = Task { [weak self] in
+            for attempt in 1...30 {
+                guard let self, self.state == .running, !Task.isCancelled else { return }
+                let status = await withCheckedContinuation { (continuation: CheckedContinuation<String, Never>) in
+                    self.native.connectGuestControl { result in
+                        continuation.resume(returning: result)
+                    }
+                }
+                guard self.state == .running, !Task.isCancelled else { return }
+                self.guestControlStatus = status
+                if status.hasPrefix("vphoned:") {
+                    self.record("Real guest vphoned VSOCK handshake established")
+                    return
+                }
+                if attempt == 1 || attempt == 30 { self.record("Guest RPC: \(status)") }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
 
     private func startCapturingGuestFrames() {
         frameTimer?.invalidate()
@@ -189,6 +222,7 @@ final class VPhoneHost: ObservableObject {
         let report = """
         \(events.joined(separator: "\n"))
         Guest frames: \(screenshotCount)
+        Guest RPC: \(guestControlStatus)
         Firmware: \(usb.bundleSummary)
         GPU: \(capabilities.metal)
         JIT: \(capabilities.jit)
