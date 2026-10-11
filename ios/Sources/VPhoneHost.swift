@@ -29,6 +29,7 @@ final class VPhoneHost: ObservableObject {
     private let native = VPhoneNativeVM()
     private var events: [String] = []
     private var frameTimer: Timer?
+    private var guestConnectTask: Task<Void, Never>?
     private var screenshotInFlight = false
     private var screenshotCount = 0
     @Published private(set) var guestFrameStatus = "No guest framebuffer yet"

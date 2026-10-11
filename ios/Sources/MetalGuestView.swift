@@ -19,13 +19,15 @@ final class GuestFrameStore: @unchecked Sendable {
 
 struct MetalGuestView: UIViewRepresentable {
     let frameStore: GuestFrameStore
+    let onTouch: (Int, Double, Double) -> Void
 
     func makeCoordinator() -> MetalFrameRenderer {
         MetalFrameRenderer(frames: frameStore)
     }
 
     func makeUIView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        let view = GuestTouchMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        view.onGuestTouch = onTouch
         view.colorPixelFormat = .bgra8Unorm
         view.preferredFramesPerSecond = 60
         view.isPaused = false
@@ -35,7 +37,9 @@ struct MetalGuestView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: MTKView, context: Context) {}
+    func updateUIView(_ uiView: MTKView, context: Context) {
+        (uiView as? GuestTouchMTKView)?.onGuestTouch = onTouch
+    }
 }
 
 final class MetalFrameRenderer: NSObject, MTKViewDelegate {
@@ -85,5 +89,30 @@ final class MetalFrameRenderer: NSObject, MTKViewDelegate {
         }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+}
+
+
+/// Real multi-touch events route into upstream vphoned guest-side HID injection.
+final class GuestTouchMTKView: MTKView {
+    var onGuestTouch: ((Int, Double, Double) -> Void)?
+    private func send(_ touches: Set<UITouch>, phase: Int) {
+        guard let touch = touches.first, bounds.width > 0, bounds.height > 0 else { return }
+        let p = touch.location(in: self)
+        let x = min(1, max(0, Double(p.x / bounds.width)))
+        let y = min(1, max(0, Double(p.y / bounds.height)))
+        onGuestTouch?(phase, x, y)
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        send(touches, phase: 0)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        send(touches, phase: 1)
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        send(touches, phase: 3)
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        send(touches, phase: 3)
     }
 }

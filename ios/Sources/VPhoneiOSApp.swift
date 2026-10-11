@@ -26,7 +26,7 @@ struct VPhoneHome: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    MetalGuestView(frameStore: host.frames)
+                    MetalGuestView(frameStore: host.frames, onTouch: { phase, x, y in host.sendGuestTouch(phase: phase, x: x, y: y) })
                         .aspectRatio(1290.0 / 2796.0, contentMode: .fit)
                         .frame(maxHeight: 470)
                         .background(.black)
@@ -49,6 +49,7 @@ struct VPhoneHome: View {
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                         Text(host.guestFrameStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Text(host.guestControlStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
                         Text(host.usb.firmwareVersion).font(.caption.monospaced()).foregroundStyle(.secondary)
                         if let path = host.usb.diskPath {
                             Label(path, systemImage: "externaldrive")

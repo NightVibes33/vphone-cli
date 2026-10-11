@@ -39,8 +39,10 @@ VMM access. There is no verified unrestricted virtualization API on a stock
 iPhone 16 with iOS 27. The backend attempts native API calls and reports the
 specific failure rather than fabricating a guest boot.
 
-The Metal frame source, actual touch injection and full RSD guest control cannot
-work until a permitted VM backend exposes guest display/input. A CI-green IPA
+The native bridge now calls upstream's real _takeScreenshotWithCompletionHandler
+on VZGraphicsDisplay and attempts a VSOCK v1 handshake with vphoned at port 1337.
+The Metal view forwards real touch phases (0/1/3) to vphoned's touch RPC once
+connected. Guest resources are never faked when no VM exists. A CI-green IPA
 is only compilation evidence, NOT proof that SpringBoard boots.
 
 Do not add private entitlements to the IPA without an Apple-authorized

@@ -1,6 +1,11 @@
 #import "VPhoneNativeVM.h"
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <unistd.h>
+#import <errno.h>
+#import <arpa/inet.h>
+#import <sys/socket.h>
+#import <sys/time.h>
 
 static NSError *Failure(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:@"com.nightvibes33.vphone.vm" code:code
@@ -31,6 +36,11 @@ static id Get(id target, NSString *key) {
 @interface VPhoneNativeVM ()
 @property (nonatomic, strong) id virtualMachine;
 @property (nonatomic, strong) id configuration;
+@property (nonatomic, strong) id guestSocketConnection;
+@property (nonatomic, assign) int guestControlFD;
+@property (nonatomic, assign) BOOL guestControlReady;
+@property (nonatomic, strong) NSPipe *serialInput;
+@property (nonatomic, strong) NSPipe *serialOutput;
 @end
 
 @implementation VPhoneNativeVM
@@ -47,6 +57,9 @@ static id Get(id target, NSString *key) {
 - (BOOL)prepareWithBundleURL:(NSURL *)bundleURL error:(NSError **)error {
     self.virtualMachine = nil;
     self.configuration = nil;
+    self.guestSocketConnection = nil;
+    self.guestControlFD = -1;
+    self.guestControlReady = NO;
     NSDictionary *manifest = [NSDictionary dictionaryWithContentsOfURL:
                               [bundleURL URLByAppendingPathComponent:@"config.plist"]];
     if (!manifest) {
@@ -216,6 +229,58 @@ static id Get(id target, NSString *key) {
             if (sep) Call(config, @"_setCoprocessors:", @[sep]);
         }
 
+
+        // Corresponds to upstream VPhoneVirtualMachine.swift audio, accelerators,
+        // console and battery configuration (all are real VZ devices).
+        id audio = Make(@"VZVirtioSoundDeviceConfiguration");
+        id audioInput = Make(@"VZVirtioSoundDeviceInputStreamConfiguration");
+        id audioOutput = Make(@"VZVirtioSoundDeviceOutputStreamConfiguration");
+        id inputSource = Make(@"VZHostAudioInputStreamSource");
+        id outputSink = Make(@"VZHostAudioOutputStreamSink");
+        if (audio && audioInput && audioOutput && inputSource && outputSink &&
+            Set(audioInput, @"source", inputSource) &&
+            Set(audioOutput, @"sink", outputSink) &&
+            Set(audio, @"streams", @[audioInput, audioOutput])) {
+            Set(config, @"audioDevices", @[audio]);
+        }
+
+        NSMutableArray *accelerators = [NSMutableArray array];
+        for (NSString *name in @[@"_VZMacVideoToolboxDeviceConfiguration",
+                                 @"_VZMacNeuralEngineDeviceConfiguration",
+                                 @"_VZMacScalerAcceleratorDeviceConfiguration"]) {
+            id item = Make(name);
+            if (item) [accelerators addObject:item];
+        }
+        if (accelerators.count &&
+            [config respondsToSelector:NSSelectorFromString(@"_setAcceleratorDevices:")]) {
+            Call(config, @"_setAcceleratorDevices:", accelerators);
+        }
+
+        id serial = Make(@"_VZPL011SerialPortConfiguration");
+        id serialAttachmentClass = (id)NSClassFromString(@"VZFileHandleSerialPortAttachment");
+        SEL serialInit = NSSelectorFromString(@"initWithFileHandleForReading:fileHandleForWriting:");
+        if (serial && [serialAttachmentClass instancesRespondToSelector:serialInit]) {
+            self.serialInput = [NSPipe pipe];
+            self.serialOutput = [NSPipe pipe];
+            id attachment = ((id (*)(id, SEL, id, id))objc_msgSend)(
+                [serialAttachmentClass alloc], serialInit,
+                self.serialInput.fileHandleForReading, self.serialOutput.fileHandleForWriting);
+            if (attachment && Set(serial, @"attachment", attachment)) {
+                Set(config, @"serialPorts", @[serial]);
+            }
+        }
+
+        id batterySource = Make(@"_VZMacSyntheticBatterySource");
+        id battery = Make(@"_VZMacBatteryPowerSourceDeviceConfiguration");
+        if (batterySource && battery) {
+            Call(batterySource, @"setCharge:", @(100.0));
+            Call(batterySource, @"setConnectivity:", @(1));
+            Call(battery, @"setSource:", batterySource);
+            if ([config respondsToSelector:NSSelectorFromString(@"_setPowerSourceDevices:")]) {
+                Call(config, @"_setPowerSourceDevices:", @[battery]);
+            }
+        }
+
         NSError *validationError = nil;
         SEL validation = NSSelectorFromString(@"validateWithError:");
         BOOL valid = [config respondsToSelector:validation] &&
@@ -240,17 +305,161 @@ static id Get(id target, NSString *key) {
 }
 
 - (void)startWithCompletion:(void (^)(NSError * _Nullable))completion {
-    SEL sel = NSSelectorFromString(@"startWithCompletionHandler:");
-    if (!self.virtualMachine || ![self.virtualMachine respondsToSelector:sel]) {
+    SEL sel = NSSelectorFromString(@"startWithOptions:completionHandler:");
+    SEL plain = NSSelectorFromString(@"startWithCompletionHandler:");
+    if (!self.virtualMachine || (![self.virtualMachine respondsToSelector:sel] && ![self.virtualMachine respondsToSelector:plain])) {
         completion(Failure(16, @"The native VM start API is unavailable.")); return;
     }
     @try {
-        ((void (*)(id, SEL, id))objc_msgSend)(self.virtualMachine, sel, [completion copy]);
+        id options = Make(@"VZMacOSVirtualMachineStartOptions");
+        if (options && [self.virtualMachine respondsToSelector:sel]) {
+            Call(options, @"_setForceDFU:", @(NO));
+            ((void (*)(id, SEL, id, id))objc_msgSend)(self.virtualMachine, sel, options, [completion copy]);
+        } else {
+            ((void (*)(id, SEL, id))objc_msgSend)(self.virtualMachine, plain, [completion copy]);
+        }
     } @catch (NSException *e) {
         completion(Failure(17, e.reason ?: @"Guest start raised an exception."));
     }
 }
+
+#pragma mark - Upstream VPhoneScreenRecorder screenshot transport
+
+- (void)captureRealFrameWithCompletion:(void (^)(UIImage * _Nullable))completion {
+    if (!self.virtualMachine) { completion(nil); return; }
+    @try {
+        NSArray *gpus = Get(self.virtualMachine, @"graphicsDevices");
+        id gpu = [gpus isKindOfClass:NSArray.class] ? gpus.firstObject : nil;
+        NSArray *displays = Get(gpu, @"displays");
+        id display = [displays isKindOfClass:NSArray.class] ? displays.firstObject : nil;
+        SEL selector = NSSelectorFromString(@"_takeScreenshotWithCompletionHandler:");
+        if (!display || ![display respondsToSelector:selector]) {
+            completion(nil); return;
+        }
+        void (^result)(id) = ^(id output) {
+            if ([output isKindOfClass:UIImage.class]) {
+                completion(output);
+            } else if (output && CFGetTypeID((__bridge CFTypeRef)output) == CGImageGetTypeID()) {
+                completion([UIImage imageWithCGImage:(__bridge CGImageRef)output]);
+            } else {
+                completion(nil);
+            }
+        };
+        ((void (*)(id, SEL, id))objc_msgSend)(display, selector, [result copy]);
+    } @catch (NSException *e) {
+        completion(nil);
+    }
+}
+
+#pragma mark - Upstream VPhoneControl protocol (vphoned port 1337)
+
+// The guest RPC framing is: uint32 big endian length + JSON v1.
+// This is a real virtio socket, independent from LocalDevVPN/host pairing.
+- (BOOL)sendAll:(const void *)bytes count:(NSUInteger)count fd:(int)fd {
+    const uint8_t *p = bytes;
+    for (NSUInteger i = 0; i < count;) {
+        ssize_t n = write(fd, p + i, count - i);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return NO;
+        i += (NSUInteger)n;
+    }
+    return YES;
+}
+- (BOOL)receiveAll:(void *)bytes count:(NSUInteger)count fd:(int)fd {
+    uint8_t *p = bytes;
+    for (NSUInteger i = 0; i < count;) {
+        ssize_t n = read(fd, p + i, count - i);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return NO;
+        i += (NSUInteger)n;
+    }
+    return YES;
+}
+- (BOOL)sendGuestMessage:(NSDictionary *)message {
+    int fd = self.guestControlFD;
+    if (fd < 0) return NO;
+    NSData *payload = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
+    if (!payload || payload.length > (1u << 20)) return NO;
+    uint32_t length = htonl((uint32_t)payload.length);
+    @synchronized(self) {
+        return [self sendAll:&length count:sizeof(length) fd:fd] &&
+               [self sendAll:payload.bytes count:payload.length fd:fd];
+    }
+}
+- (NSDictionary *)receiveGuestMessage:(int)fd {
+    uint32_t lengthBE = 0;
+    if (![self receiveAll:&lengthBE count:4 fd:fd]) return nil;
+    uint32_t length = ntohl(lengthBE);
+    if (!length || length > (1u << 20)) return nil;
+    NSMutableData *buffer = [NSMutableData dataWithLength:length];
+    if (![self receiveAll:buffer.mutableBytes count:length fd:fd]) return nil;
+    id decoded = [NSJSONSerialization JSONObjectWithData:buffer options:0 error:nil];
+    return [decoded isKindOfClass:NSDictionary.class] ? decoded : nil;
+}
+- (void)connectGuestControlWithCompletion:(void (^)(NSString *))completion {
+    NSArray *sockets = Get(self.virtualMachine, @"socketDevices");
+    id device = [sockets isKindOfClass:NSArray.class] ? sockets.firstObject : nil;
+    SEL selector = NSSelectorFromString(@"connectToPort:completionHandler:");
+    if (!device || ![device respondsToSelector:selector]) {
+        completion(@"VM guest virtio socket not exposed on the iOS host");
+        return;
+    }
+    @try {
+        void (^connected)(id, NSError *) = ^(id connection, NSError *connectError) {
+            if (!connection || connectError) {
+                completion([NSString stringWithFormat:@"vphoned not reachable: %@",
+                            connectError.localizedDescription ?: @"guest offline"]);
+                return;
+            }
+            SEL selector = NSSelectorFromString(@"fileDescriptor");
+            if (![connection respondsToSelector:selector]) {
+                completion(@"Guest socket file descriptor unavailable");
+                return;
+            }
+            int fd = ((int (*)(id, SEL))objc_msgSend)(connection, selector);
+            if (fd < 0) { completion(@"Invalid vphoned socket"); return; }
+            self.guestControlFD = fd;
+            self.guestSocketConnection = connection;
+            struct timeval timeout = {.tv_sec = 8, .tv_usec = 0};
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                if (![self sendGuestMessage:@{@"v": @1, @"t": @"hello"}]) {
+                    completion(@"Cannot send vphoned hello");
+                    return;
+                }
+                NSDictionary *hello = [self receiveGuestMessage:fd];
+                if (![hello[@"t"] isEqual:@"hello"] || [hello[@"v"] integerValue] != 1) {
+                    completion(@"Guest vphoned protocol v1 handshake unavailable");
+                    return;
+                }
+                self.guestControlReady = YES;
+                completion([NSString stringWithFormat:@"vphoned: %@; capabilities: %@",
+                            hello[@"name"] ?: @"iPhone", hello[@"caps"] ?: @[]]);
+                while (self.guestControlReady && self.guestControlFD == fd) {
+                    if (![self receiveGuestMessage:fd]) break;
+                }
+                self.guestControlReady = NO;
+            });
+        };
+        ((void (*)(id, SEL, uint32_t, id))objc_msgSend)(
+            device, selector, (uint32_t)1337, [connected copy]);
+    } @catch (NSException *e) {
+        completion(e.reason ?: @"Guest VSOCK connection failed");
+    }
+}
+- (BOOL)sendTouchWithPhase:(NSInteger)phase x:(double)x y:(double)y {
+    if (!self.guestControlReady || self.guestControlFD < 0) return NO;
+    return [self sendGuestMessage:@{@"v": @1, @"t": @"touch",
+                                    @"id": NSUUID.UUID.UUIDString,
+                                    @"phase": @(phase),
+                                    @"x": @(MAX(0.0, MIN(1.0, x))),
+                                    @"y": @(MAX(0.0, MIN(1.0, y)))}];
+}
+
 - (void)stopWithCompletion:(void (^)(NSError * _Nullable))completion {
+    self.guestControlReady = NO;
+    self.guestControlFD = -1;
+    self.guestSocketConnection = nil;
     if (!self.virtualMachine) { completion(nil); return; }
     SEL sel = NSSelectorFromString(@"stopWithCompletionHandler:");
     @try {
