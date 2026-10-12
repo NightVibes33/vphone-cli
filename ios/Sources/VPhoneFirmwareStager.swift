@@ -14,7 +14,6 @@ protocol FirmwareTransferEngine: AnyObject {
 final class VPhoneFirmwareStager: ObservableObject {
     enum Kind { case ios, cloudOS }
     enum Destination {
-        case onDevice
         case chosenFolder(URL)
     }
 
@@ -69,19 +68,14 @@ final class VPhoneFirmwareStager: ObservableObject {
         let folder: URL
         let destinationLabel: String
         switch destination {
-        case .onDevice:
-            folder = Self.onDeviceFolder
-            destinationLabel = "On My iPhone → VPhone → Firmware"
         case .chosenFolder(let selected):
             folder = selected
-            destinationLabel = "Selected Files folder: \(selected.lastPathComponent)"
+            destinationLabel = "Selected USB folder: \(selected.lastPathComponent)"
         }
-        do {
-            if case .onDevice = destination {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            }
-        } catch {
-            status = "Cannot open \(destinationLabel): \(error.localizedDescription)"
+        // Large firmware downloads are never written to the iPhone's internal
+        // Documents or temporary storage. The Files picker owns this URL.
+        guard folder.isFileURL else {
+            status = "Select a writable USB drive folder in Files."
             return
         }
 

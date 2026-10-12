@@ -268,3 +268,44 @@ the bundle as `unrestored`; no `restore-info.json` is fabricated, and
 This change removes the unnecessary requirement to hand-assemble
 `config.plist` and `Disk.img` to get the same *initial* bundle layout
 as upstream, without falsely claiming the guest is ready to boot.
+
+
+## October 2026: USB-only native VPhone storage and host ROM artifact
+
+A macOS 15 GitHub Actions runner successfully located the genuine
+`AVPBooter.vresearch1.bin` and `AVPSEPBooter.vresearch1.bin` in Apple's
+Virtualization.framework, and uploaded both plus `SHA256SUMS` and
+`manifest.json` to the workflow `Prepare VPhone host ROM artifact`.
+Artifact run: https://github.com/NightVibes33/vphone-cli/actions/runs/38195524095
+
+The iOS app now downloads these ROMs through GitHub's authenticated Actions
+artifact API using a fine-grained GitHub token with **Actions: Read** access.
+The token is kept only in memory and removed from HTTPS redirect requests to
+the signed artifact storage host. `URLSessionDataDelegate` writes streaming
+network chunks to the user-selected USB folder's security-scoped FileHandle.
+The archive stays on USB as `VPhone-macOS-host-ROMs.zip`; the app creates no
+full-size copy in iPhone Documents, Caches or tmp. GitHub Actions artifacts
+expire; rerun the macOS workflow when needed.
+
+In Files on USB, extract the ROM artifact ZIP. The extracted directory
+`VPhone-macOS-host-ROMs` must contain the two `.bin` files and `SHA256SUMS`.
+Select that same USB root when creating a bundle. The iOS app verifies the
+SHA-256 of both ROMs, locates both IPSWs in the USB root or USB `Firmware/`,
+and invokes the ORIGINAL upstream `VPhoneBundleOps.create` to put the sparse
+32 GiB `Disk.img`, `config.plist`, SEPStorage and ROM copies under USB
+`VMs/<bundle-name>/`. No VM disk or IPSWs are staged on the iPhone.
+
+The former On My iPhone download destination is no longer offered. Existing
+on-device downloads remain in Files until the user moves/deletes them.
+The Files picker **cannot cryptographically confirm a physical USB device**;
+users must select their USB volume rather than On My iPhone or iCloud Drive.
+Some Files providers can internally cache data during file operations; the
+app does not intentionally stage large files on internal storage.
+
+**Critical:** This only creates upstream VM *bundle layout*. It does not
+implement the macOS-only firmware patch, virtual DFU restore or custom firmware
+installation steps, and does not grant PV=3 hypervisor entitlements. iOS 27
+SpringBoard boot is not proven on a normal SideStore-signed iPhone 16.
+
+Be mindful of Apple's license restrictions when handling research ROM binaries
+and do not publish them as arbitrary publicly distributed release assets.

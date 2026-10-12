@@ -1,155 +1,122 @@
 import Foundation
 import Combine
+import CryptoKit
 
-/// The upstream VPhoneBundleOps.create layout is the first stage of vm create.
-/// This does not patch, DFU-restore, or activate the guest. It does not produce
-/// restore-info.json because no restore has taken place.
+/// Creates the real upstream VM bundle ON USB, without staging the IPSWs,
+/// boot ROMs, or sparse Disk.img on the iPhone.
 @MainActor
 final class VPhoneBundleProvisioner: ObservableObject {
-    enum Destination {
-        case onDevice
-        case selectedFolder(URL)
-    }
-    enum ROM: String, CaseIterable {
-        case avpBooter = "AVPBooter.vresearch1.bin"
-        case avpSEPBooter = "AVPSEPBooter.vresearch1.bin"
-    }
-
-    @Published private(set) var status = "Upstream VM bundle: not prepared"
+    @Published private(set) var status = "Select the USB folder containing Firmware and extracted host ROMs."
     @Published private(set) var createdBundleURL: URL?
-    @Published private(set) var readyROMs: Set<String> = []
 
-    private var romStore: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("VPhoneHostROMs", isDirectory: true)
-    }
-    private var documentRoot: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    }
-
-    init() { refreshROMs() }
-
-    func refreshROMs() {
-        readyROMs = Set(ROM.allCases.filter { rom in
-            let url = romStore.appendingPathComponent(rom.rawValue)
-            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-            let bytes = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-            return bytes > 0
-        }.map(\.rawValue))
-    }
-
-    func importROM(_ result: Result<URL, Error>, as rom: ROM) {
-        do {
-            let source = try result.get()
-            let scoped = source.startAccessingSecurityScopedResource()
-            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-            let attrs = try FileManager.default.attributesOfItem(atPath: source.path)
-            let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-            guard size > 1024 && size < 128 * 1024 * 1024 else {
-                throw ProvisionError.invalidROM
-            }
-            try FileManager.default.createDirectory(at: romStore, withIntermediateDirectories: true)
-            let target = romStore.appendingPathComponent(rom.rawValue)
-            let temporary = romStore.appendingPathComponent(".rom-\(UUID().uuidString)")
-            try FileManager.default.copyItem(at: source, to: temporary)
-            do {
-                if FileManager.default.fileExists(atPath: target.path) {
-                    try FileManager.default.removeItem(at: target)
-                }
-                try FileManager.default.moveItem(at: temporary, to: target)
-            } catch {
-                try? FileManager.default.removeItem(at: temporary)
-                throw error
-            }
-            refreshROMs()
-            status = "Imported \(rom.rawValue) from Files. VM firmware restore is still required."
-        } catch {
-            status = "Cannot import \(rom.rawValue): \(error.localizedDescription)"
-        }
-    }
-
-    func createBundle(destination: Destination, pairing: VPhoneFirmwarePairing) -> URL? {
-        let root: URL
-        switch destination {
-        case .onDevice:
-            root = documentRoot
-        case .selectedFolder(let url):
-            root = url
-        }
-        let scope: Bool
-        switch destination {
-        case .onDevice: scope = false
-        case .selectedFolder: scope = root.startAccessingSecurityScopedResource()
-        }
+    func createBundle(onUSB root: URL, pairing: VPhoneFirmwarePairing) -> URL? {
+        let scope = root.startAccessingSecurityScopedResource()
         defer { if scope { root.stopAccessingSecurityScopedResource() } }
-
         do {
-            refreshROMs()
-            guard readyROMs.contains(ROM.avpBooter.rawValue),
-                  readyROMs.contains(ROM.avpSEPBooter.rawValue) else {
-                throw ProvisionError.missingHostROMs
+            guard root.isFileURL else { throw ProvisionError.invalidUSB }
+            let fm = FileManager.default
+            let iphone = "\(pairing.iosName.replacingOccurrences(of: " ", with: "-"))-iPhone17,3.ipsw"
+            let cloud = "\(pairing.cloudosName.replacingOccurrences(of: " ", with: "-"))-cloudOS.ipsw"
+            let roots = [root, root.appendingPathComponent("Firmware", isDirectory: true)]
+            let iosSource = roots.map { $0.appendingPathComponent(iphone) }.first {
+                fm.isReadableFile(atPath: $0.path)
             }
-            let firmwareFolder = root.appendingPathComponent("Firmware", isDirectory: true)
-            let searchRoots = [root, firmwareFolder]
-            let iphoneFileName = "\(pairing.iosName.replacingOccurrences(of: " ", with: "-"))-iPhone17,3.ipsw"
-            let cloudFileName = "\(pairing.cloudosName.replacingOccurrences(of: " ", with: "-"))-cloudOS.ipsw"
-            let iosSource = searchRoots.map { $0.appendingPathComponent(iphoneFileName) }
-                .first { FileManager.default.isReadableFile(atPath: $0.path) }
-            let cloudSource = searchRoots.map { $0.appendingPathComponent(cloudFileName) }
-                .first { FileManager.default.isReadableFile(atPath: $0.path) }
+            let cloudSource = roots.map { $0.appendingPathComponent(cloud) }.first {
+                fm.isReadableFile(atPath: $0.path)
+            }
             guard let iosSource, let cloudSource else {
-                throw ProvisionError.missingFirmware(
-                    iphone: iosSource == nil ? iphoneFileName : nil,
-                    cloud: cloudSource == nil ? cloudFileName : nil)
+                throw ProvisionError.missingIPSW([iosSource == nil ? iphone : nil,
+                                                  cloudSource == nil ? cloud : nil].compactMap { $0 })
             }
-            let vmRoot = root.appendingPathComponent("VMs", isDirectory: true)
-            try FileManager.default.createDirectory(at: vmRoot, withIntermediateDirectories: true)
-            let name = "vphone-iOS27-\(pairing.iosName.replacingOccurrences(of: " ", with: "-"))"
-                .replacingOccurrences(of: "/", with: "-")
-            let library = VPhoneLibrary(root: vmRoot)
-            let spec = VPhoneBundleOps.NewBundleSpec(
-                name: name,
-                cpuCount: 4,
-                memoryMB: 3072,
-                diskSizeGB: 32,
-                romSource: romStore.appendingPathComponent(ROM.avpBooter.rawValue),
-                sepromSource: romStore.appendingPathComponent(ROM.avpSEPBooter.rawValue))
-            let bundle = try VPhoneBundleOps.create(spec, in: library)
 
-            // Paths refer to the ORIGINAL downloaded firmware outside Disk.img:
-            // no IPSW archive is duplicated in VM storage.
+            // iOS Files extracts VPhone-macOS-host-ROMs.zip into a folder of
+            // the same name. No ROMs are ever stored under On My iPhone.
+            let romDirectories = [
+                root.appendingPathComponent("VPhone-macOS-host-ROMs", isDirectory: true),
+                root.appendingPathComponent("VPhoneHostROMs", isDirectory: true),
+                root
+            ]
+            guard let romFolder = romDirectories.first(where: { folder in
+                fm.isReadableFile(atPath: folder.appendingPathComponent("AVPBooter.vresearch1.bin").path)
+                    && fm.isReadableFile(atPath: folder.appendingPathComponent("AVPSEPBooter.vresearch1.bin").path)
+            }) else {
+                throw ProvisionError.missingROMs
+            }
+            // Only accept the exact two unmodified ROMs from the runner ZIP.
+            try validateROMs(in: romFolder)
+
+            let libraryRoot = root.appendingPathComponent("VMs", isDirectory: true)
+            try fm.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+            let vmName = "vphone-iOS27-\(pairing.iosName.replacingOccurrences(of: " ", with: "-"))"
+                .replacingOccurrences(of: "/", with: "-")
+            let spec = VPhoneBundleOps.NewBundleSpec(
+                name: vmName, cpuCount: 4, memoryMB: 3072, diskSizeGB: 32,
+                romSource: romFolder.appendingPathComponent("AVPBooter.vresearch1.bin"),
+                sepromSource: romFolder.appendingPathComponent("AVPSEPBooter.vresearch1.bin"))
+            let bundle = try VPhoneBundleOps.create(spec, in: VPhoneLibrary(root: libraryRoot))
             let stage = FirmwareStage(
                 format: 1,
                 status: "unrestored",
-                iphoneIPSW: "../../" + relativeSource(iosSource, root: root),
-                cloudOSIPSW: "../../" + relativeSource(cloudSource, root: root),
-                iosVersion: pairing.iosName,
-                cloudOSVersion: pairing.cloudosName,
-                instructions: "Run upstream fw prepare/patch, DFU restore and custom firmware install before booting. No restore has occurred.")
+                iphoneIPSW: "../../" + relativePath(iosSource, root: root),
+                cloudOSIPSW: "../../" + relativePath(cloudSource, root: root),
+                iosVersion: pairing.iosName, cloudOSVersion: pairing.cloudosName,
+                instructions: "Run upstream fw prepare/patch, DFU restore and CFW installation before booting.")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             do {
-                try encoder.encode(stage).write(
-                    to: bundle.url.appendingPathComponent("firmware-stage.json"), options: .atomic)
+                try encoder.encode(stage).write(to:
+                    bundle.url.appendingPathComponent("firmware-stage.json"), options: .atomic)
             } catch {
-                // Do not leave an orphaned disk or a manifest that looks ready.
-                try? FileManager.default.removeItem(at: bundle.url)
+                try? fm.removeItem(at: bundle.url)
                 throw error
             }
             createdBundleURL = bundle.url
-            status = "Created upstream VPhone VM layout at \(bundle.url.lastPathComponent), with config.plist, a sparse 32 GB Disk.img, 512 KB SEPStorage and imported host ROMs. Firmware is linked by relative paths, not copied. Status: UNRESTORED. DFU restore and PV=3 authorization are still required."
+            status = "USB bundle created: VMs/\(vmName). Uses original upstream config.plist and Disk.img. No firmware or VM data copied into the iPhone container. UNRESTORED: it still requires DFU restore and host VM permission before boot."
             return bundle.url
         } catch {
-            status = "VM bundle creation failed: \(error.localizedDescription)"
+            status = "USB VM creation failed: \(error.localizedDescription)"
             return nil
         }
     }
 
-    private func relativeSource(_ url: URL, root: URL) -> String {
-        let rootPath = root.standardizedFileURL.path
-        let path = url.standardizedFileURL.path
-        guard path.hasPrefix(rootPath + "/") else { return url.lastPathComponent }
-        return String(path.dropFirst(rootPath.count + 1))
+    private func validateROMs(in folder: URL) throws {
+        let checksumURL = folder.appendingPathComponent("SHA256SUMS")
+        guard let checksums = try? String(contentsOf: checksumURL, encoding: .utf8) else {
+            throw ProvisionError.missingChecksums
+        }
+        let required = ["AVPBooter.vresearch1.bin", "AVPSEPBooter.vresearch1.bin"]
+        for name in required {
+            guard let checksumLine = checksums.split(whereSeparator: \.isNewline)
+                .map(String.init)
+                .first(where: { $0.hasSuffix(name) }),
+                  let expected = checksumLine.split(whereSeparator: \.isWhitespace).first,
+                  expected.count == 64,
+                  expected.allSatisfy({ $0.isHexDigit }) else {
+                throw ProvisionError.missingChecksums
+            }
+            let url = folder.appendingPathComponent(name)
+            let fd = try FileHandle(forReadingFrom: url)
+            defer { try? fd.close() }
+            var sha = SHA256()
+            var size = 0
+            while let data = try fd.read(upToCount: 128 * 1024), !data.isEmpty {
+                sha.update(data: data)
+                size += data.count
+                guard size < 128 * 1024 * 1024 else { throw ProvisionError.invalidROM(name) }
+            }
+            guard size > 1024 else { throw ProvisionError.invalidROM(name) }
+            let actual = sha.finalize().map { String(format: "%02x", $0) }.joined()
+            guard actual.caseInsensitiveCompare(String(expected)) == .orderedSame else {
+                throw ProvisionError.checksumMismatch(name)
+            }
+        }
+    }
+
+    private func relativePath(_ url: URL, root: URL) -> String {
+        let base = root.standardizedFileURL.path
+        let file = url.standardizedFileURL.path
+        guard file.hasPrefix(base + "/") else { return url.lastPathComponent }
+        return String(file.dropFirst(base.count + 1))
     }
 
     private struct FirmwareStage: Codable {
@@ -163,20 +130,27 @@ final class VPhoneBundleProvisioner: ObservableObject {
     }
 
     private enum ProvisionError: LocalizedError {
-        case missingHostROMs
-        case missingFirmware(iphone: String?, cloud: String?)
-        case invalidROM
-
+        case invalidUSB
+        case missingIPSW([String])
+        case missingROMs
+        case missingChecksums
+        case invalidROM(String)
+        case checksumMismatch(String)
         var errorDescription: String? {
             switch self {
-            case .missingHostROMs:
-                return "Upstream VM creation requires both research host ROMs (AVPBooter.vresearch1.bin and AVPSEPBooter.vresearch1.bin), which upstream obtains from the macOS Virtualization framework. Import these real files first; the downloaded IPSWs do not contain them."
-            case let .missingFirmware(iphone, cloud):
-                return "Missing downloaded firmware in the chosen storage folder: \([iphone, cloud].compactMap { $0 }.joined(separator: ", ")). Select the storage location holding both files. Firmware on the phone is not silently copied to USB."
-            case .invalidROM:
-                return "ROM is empty, truncated or unexpectedly large. Import the upstream AVP boot ROM file, not an IPSW."
+            case .invalidUSB:
+                return "Select an accessible external USB folder in Files."
+            case .missingIPSW(let files):
+                return "Firmware not found on the USB volume: \(files.joined(separator: ", ")). Download both directly to USB or move existing iPhone downloads there using Files."
+            case .missingROMs:
+                return "Host ROMs not found on USB. Download the macOS runner artifact to USB and tap its ZIP in Files to extract VPhone-macOS-host-ROMs/ with both .bin files."
+            case .missingChecksums:
+                return "Missing SHA256SUMS in the extracted ROM artifact folder."
+            case .invalidROM(let name):
+                return "Unexpected host ROM file length: \(name)"
+            case .checksumMismatch(let name):
+                return "Host ROM SHA-256 mismatch: \(name). Re-extract the runner artifact on USB."
             }
         }
     }
 }
-

@@ -23,11 +23,11 @@ struct VPhoneHome: View {
     @EnvironmentObject private var host: VPhoneHost
     @StateObject private var firmware = VPhoneFirmwareStager()
     @StateObject private var provisioner = VPhoneBundleProvisioner()
-    @AppStorage("vphone.firmware.storage.destination") private var firmwareStorage = "device"
+    @StateObject private var romDownload = VPhoneROMArtifactDownloader()
+    @State private var githubActionsToken = ""
+    @State private var importingROMArtifactUSBFolder = false
     @State private var importingFirmwareFolder = false
     @State private var importingVMStorageFolder = false
-    @State private var importingROM = false
-    @State private var selectedROM: VPhoneBundleProvisioner.ROM = .avpBooter
     @State private var firmwareKind: VPhoneFirmwareStager.Kind = .ios
     @State private var importingFolder = false
     @State private var importingPairing = false
@@ -38,25 +38,15 @@ struct VPhoneHome: View {
 
     private func startFirmwareDownload(_ kind: VPhoneFirmwareStager.Kind) {
         firmwareKind = kind
-        if firmwareStorage == "device" {
-            firmware.download(kind, destination: .onDevice)
-        } else {
-            importingFirmwareFolder = true
-        }
+        importingFirmwareFolder = true
     }
 
-    private func prepareFromDownloadedFirmware(_ destination: VPhoneBundleProvisioner.Destination) {
+    private func prepareFromDownloadedFirmware(onUSB folder: URL) {
         guard firmware.pairings.indices.contains(firmware.selection) else { return }
-        if let bundle = provisioner.createBundle(
-            destination: destination, pairing: firmware.pairings[firmware.selection]) {
-            switch destination {
-            case .onDevice:
-                host.selectUSB(.success(bundle))
-            case .selectedFolder(let folder):
-                // Preserve the authorized USB root rather than passing an
-                // unauthorized descendant scope to the VM runtime.
-                host.selectUSB(.success(folder))
-            }
+        if provisioner.createBundle(onUSB: folder,
+                                    pairing: firmware.pairings[firmware.selection]) != nil {
+            // The picker authorized the root; VPhone's VM lives under /VMs.
+            host.selectUSB(.success(folder))
         }
     }
 
@@ -123,7 +113,7 @@ struct VPhoneHome: View {
                             .disabled(host.state != .running && host.state != .stopUnconfirmed)
                     }
 
-                    GroupBox("VM disk · On My iPhone or USB") {
+                    GroupBox("VM disk · USB storage") {
                         VStack(alignment: .leading, spacing: 8) {
                             Button("Select existing VM folder in Files") { importingFolder = true }
                                 .buttonStyle(.bordered)
@@ -136,11 +126,10 @@ struct VPhoneHome: View {
                                     .textSelection(.enabled)
                             }
                             if !firmware.onDeviceFiles.isEmpty && host.usb.diskPath == nil {
-                                Text("Found \(firmware.onDeviceFiles.count) downloaded firmware file(s) on this iPhone. Downloaded IPSWs are not bootable VM disks until a restore creates config.plist, Disk.img, NVRAM and ROM/SEP files.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Text("Existing iPhone downloads: \(firmware.onDeviceFiles.count). To use USB-only storage, move those old IPSWs onto your drive with Files; VPhone will not copy them automatically.")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                            Text("Choose a prepared VM from On My iPhone or external USB in Files. If using USB, do not unplug it until VPhone confirms VM stopped.")
+                            Text("Select the external USB folder containing VMs. Keep it connected until the guest is fully stopped.")
                                 .font(.caption).foregroundStyle(.secondary)
                             Text("The VM folder requires a generated config.plist and Disk.img plus iBoot, NVRAM and SEP assets. The app can download IPSWs but does not yet perform the required iOS 27 guest restore.")
                                 .font(.caption)
@@ -149,20 +138,10 @@ struct VPhoneHome: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    GroupBox("Firmware files · choose storage") {
+                    GroupBox("Firmware files · download to USB") {
                         VStack(alignment: .leading, spacing: 10) {
-                            Picker("Download destination", selection: $firmwareStorage) {
-                                Text("On My iPhone").tag("device")
-                                Text("USB drive").tag("usb")
-                            }
-                            .pickerStyle(.segmented)
-                            .disabled(firmware.isDownloading)
-
-                            Text(firmwareStorage == "device"
-                                 ? "Files → On My iPhone → VPhone → Firmware. The app downloads directly here."
-                                 : "Select the USB destination folder through Files when starting a download.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text("All new iOS IPSW and cloudOS downloads go directly to the USB folder you select in Files. No iPhone Documents or Caches copy.")
+                                .font(.caption).foregroundStyle(.secondary)
 
                             Picker("iOS build", selection: $firmware.selection) {
                                 ForEach(firmware.pairings.indices, id: \.self) { i in
@@ -227,56 +206,69 @@ struct VPhoneHome: View {
                             Text("Fast IPSW mode uses up to 4 parallel Apple CDN connections when range downloads are supported. Finished 32 MB blocks are checkpointed for resume. CloudOS and unsupported servers use compatible single-stream mode.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Text("Both destinations resume in the same folder. Do not unplug USB during downloads. Downloading firmware does not restore or boot the guest.")
+                            Text("Partial downloads stay on the selected USB folder. Older files already downloaded to On My iPhone are not automatically copied; use Files to move them to USB if needed. Firmware downloads do not restore the guest.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
 
-                    GroupBox("Upstream VPhone VM bundle") {
+                    GroupBox("Host ROM artifact · macOS runner → USB") {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Use your downloaded iOS IPSW and cloudOS to create the SAME VM layout as upstream VPhoneBundleOps.create: config.plist, sparse Disk.img, SEPStorage and real AVP boot ROMs.")
+                            Text("GitHub Actions successfully collected the genuine Apple Virtualization.framework research boot ROMs on macOS 15. The archive is downloaded directly to your chosen USB folder, not the iPhone.")
                                 .font(.caption).foregroundStyle(.secondary)
 
-                            Text("Required upstream host ROM files")
-                                .font(.subheadline.bold())
-                            HStack {
-                                Button("Import AVP ROM") {
-                                    selectedROM = .avpBooter
-                                    importingROM = true
+                            SecureField("GitHub token (Actions: Read)", text: $githubActionsToken)
+                                .textContentType(.password)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .font(.caption)
+                            Text("A fine-grained GitHub token with repository Actions: Read is needed to download Actions artifacts. It is kept only in memory, never stored in the app or sent to the signed artifact host.")
+                                .font(.caption2).foregroundStyle(.secondary)
+
+                            HStack(spacing: 10) {
+                                Button("Download ROM artifact to USB") {
+                                    importingROMArtifactUSBFolder = true
                                 }
-                                .buttonStyle(.bordered)
-                                Button("Import SEP ROM") {
-                                    selectedROM = .avpSEPBooter
-                                    importingROM = true
+                                .buttonStyle(.borderedProminent)
+                                .disabled(romDownload.downloading)
+
+                                if romDownload.downloading {
+                                    Button("Cancel") { romDownload.cancel() }
+                                        .buttonStyle(.bordered)
                                 }
-                                .buttonStyle(.bordered)
-                            }
-                            .font(.caption)
-                            ForEach(VPhoneBundleProvisioner.ROM.allCases, id: \.rawValue) { rom in
-                                Label(rom.rawValue,
-                                      systemImage: provisioner.readyROMs.contains(rom.rawValue)
-                                        ? "checkmark.circle.fill" : "circle.dashed")
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
                             }
 
-                            Button("Create upstream VM bundle from downloads") {
-                                if firmwareStorage == "device" {
-                                    prepareFromDownloadedFirmware(.onDevice)
-                                } else {
-                                    importingVMStorageFolder = true
-                                }
+                            if romDownload.downloading {
+                                ProgressView(value: romDownload.fraction)
+                            }
+                            Text(romDownload.status)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .foregroundStyle(.secondary)
+                            Link("View ROM artifact in GitHub Actions",
+                                 destination: URL(string: "https://github.com/NightVibes33/vphone-cli/actions/workflows/vphone-host-roms.yml")!)
+                                .font(.caption)
+
+                            Text("After downloading, use Files on the USB drive to extract VPhone-macOS-host-ROMs.zip. The app then finds both ROMs and SHA256SUMS inside the extracted folder on USB.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    GroupBox("Create upstream VM · USB only") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Uses the actual upstream VPhoneBundleOps.create, the iOS/cloudOS IPSWs and the verified ROMs already on the same USB drive. The VM disk, SEP files and config.plist are created on USB.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button("Create VM bundle on USB") {
+                                importingVMStorageFolder = true
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(firmware.isDownloading || firmware.pairings.isEmpty)
-
+                            .disabled(firmware.isDownloading || firmware.pairings.isEmpty ||
+                                      romDownload.downloading)
                             Text(provisioner.status)
                                 .font(.caption.monospaced())
                                 .textSelection(.enabled)
                                 .foregroundStyle(.secondary)
-
-                            Text("Bundle creation is stage 1 only. Upstream also patches firmware, restores the virtual disk through DFU and installs custom firmware. Those stages and private PV=3 virtualization permission remain unavailable on an ordinarily signed iPhone; this bundle is NOT bootable until restored.")
+                            Text("Upstream bundle creation is only the first stage. DFU restoration, firmware patching and private PV=3 virtualization authorization remain unavailable on a normal SideStore-signed iPhone. An unrestored disk cannot boot iOS.")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                         }
@@ -369,12 +361,14 @@ struct VPhoneHome: View {
                     ShareSheet(items: [screenshotURL])
                 }
             }
-            .fileImporter(isPresented: $importingROM, allowedContentTypes: [.data]) { result in
-                provisioner.importROM(result, as: selectedROM)
+            .fileImporter(isPresented: $importingROMArtifactUSBFolder, allowedContentTypes: [.folder]) { result in
+                if case .success(let folder) = result {
+                    romDownload.fetch(to: folder, token: githubActionsToken)
+                }
             }
             .fileImporter(isPresented: $importingVMStorageFolder, allowedContentTypes: [.folder]) { result in
                 if case let .success(folder) = result {
-                    prepareFromDownloadedFirmware(.selectedFolder(folder))
+                    prepareFromDownloadedFirmware(onUSB: folder)
                 }
             }
             .fileImporter(isPresented: $importingFirmwareFolder, allowedContentTypes: [.folder]) { result in
