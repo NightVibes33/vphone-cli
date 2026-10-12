@@ -110,9 +110,20 @@ struct VPhoneHome: View {
                                 .buttonStyle(.bordered)
                                 .disabled(host.state == .running || host.state == .starting || host.state == .stopping || host.state == .stopUnconfirmed)
                             Text(host.storageStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            if host.state == .failed {
+                                Text(host.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .textSelection(.enabled)
+                            }
+                            if !firmware.onDeviceFiles.isEmpty && host.usb.diskPath == nil {
+                                Text("Found \(firmware.onDeviceFiles.count) downloaded firmware file(s) on this iPhone. Downloaded IPSWs are not bootable VM disks until a restore creates config.plist, Disk.img, NVRAM and ROM/SEP files.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Text("Choose a prepared VM from On My iPhone or external USB in Files. If using USB, do not unplug it until VPhone confirms VM stopped.")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("Select a prepared upstream vphone bundle with iBoot ROM, SEP ROM, NVRAM, Disk.img and config.plist. The real disk is read from USB in place.")
+                            Text("The VM folder requires a generated config.plist and Disk.img plus iBoot, NVRAM and SEP assets. The app can download IPSWs but does not yet perform the required iOS 27 guest restore.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

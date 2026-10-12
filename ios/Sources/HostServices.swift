@@ -11,87 +11,236 @@ final class ExternalVMBundle: ObservableObject {
     @Published private(set) var diskPath: String?
     @Published private(set) var bundleSummary = "No VM selected"
     @Published private(set) var firmwareVersion = "Unknown"
+
+    // Bookmark the exact URL the Files picker authorized (the USB root or a
+    // selected folder). Derived subfolders do not necessarily have their own
+    // security-scope entitlement.
+    private let bookmarkKey = "vphone.usb.folder.bookmark"
+    private let relativePathKey = "vphone.usb.bundle.relativePath"
     private var bookmarked: Data?
-    private var activeURL: URL?
-    private var acquiredAccess = false
     private var selectedURL: URL?
+    private var relativeBundlePath = ""
+    private var activeScopeURL: URL?
+    private var acquiredAccess = false
+    private var activeBundleURL: URL?
 
     var isDiskAccessible: Bool {
-        guard let activeURL, let diskPath else { return false }
-        return FileManager.default.isReadableFile(atPath: activeURL.appendingPathComponent("config.plist").path)
-            && FileManager.default.isReadableFile(atPath: diskPath)
+        guard let bundleURL = activeBundleURL,
+              let diskPath else { return false }
+        return FileManager.default.isReadableFile(
+            atPath: bundleURL.appendingPathComponent("config.plist").path
+        ) && FileManager.default.isReadableFile(atPath: diskPath)
     }
 
     init() {
-        bookmarked = UserDefaults.standard.data(forKey: "vphone.usb.folder.bookmark")
+        bookmarked = UserDefaults.standard.data(forKey: bookmarkKey)
+        relativeBundlePath = UserDefaults.standard.string(forKey: relativePathKey) ?? ""
         if let bookmarked {
             var stale = false
-            if let url = try? URL(resolvingBookmarkData: bookmarked, options: [], relativeTo: nil, bookmarkDataIsStale: &stale), !stale {
-                diskPath = url.path
+            if let root = try? URL(resolvingBookmarkData: bookmarked, options: [],
+                                   relativeTo: nil, bookmarkDataIsStale: &stale), !stale {
+                selectedURL = root
+                let bundle = relativeBundlePath.isEmpty ? root
+                    : root.appendingPathComponent(relativeBundlePath, isDirectory: true)
+                let scope = root.startAccessingSecurityScopedResource()
+                if let loaded = try? VPhoneBundle.load(at: bundle) {
+                    diskPath = bundle.url.appendingPathComponent(loaded.manifest.diskImage).path
+                    firmwareVersion = Self.versionSummary(
+                        VPhoneRestoreInfo.load(fromBundle: loaded))
+                    bundleSummary = Self.bundleSummary(loaded, firmwareVersion: firmwareVersion)
+                }
+                if scope { root.stopAccessingSecurityScopedResource() }
             }
         }
     }
 
-    func select(_ url: URL) throws {
-        let granted = url.startAccessingSecurityScopedResource()
-        defer { if granted { url.stopAccessingSecurityScopedResource() } }
-        let bundle = try VPhoneBundle.load(at: url)
-        let image = bundle.manifest.diskImage
-        let restored = VPhoneRestoreInfo.load(fromBundle: bundle)
-        guard !image.contains(".."), !image.hasPrefix("/") else {
+    func select(_ pickerURL: URL) throws {
+        let fm = FileManager.default
+        let scoped = pickerURL.startAccessingSecurityScopedResource()
+        defer { if scoped { pickerURL.stopAccessingSecurityScopedResource() } }
+
+        guard pickerURL.isFileURL else {
+            throw VPhoneStorageError.unavailableFolder
+        }
+        var directoryFlag: ObjCBool = false
+        guard fm.fileExists(atPath: pickerURL.path, isDirectory: &directoryFlag),
+              directoryFlag.boolValue else {
+            throw VPhoneStorageError.unavailableFolder
+        }
+
+        let selected = try Self.findBundle(in: pickerURL)
+        let bundle = try VPhoneBundle.load(at: selected.url)
+        let diskName = bundle.manifest.diskImage
+        guard Self.safeRelativeFileName(diskName) else {
             throw VPhoneStorageError.invalidImagePath
         }
-        let disk = url.appendingPathComponent(image)
-        guard FileManager.default.fileExists(atPath: disk.path) else {
+        let disk = selected.url.appendingPathComponent(diskName)
+        guard fm.isReadableFile(atPath: disk.path) else {
             throw VPhoneStorageError.missingDisk(disk.lastPathComponent)
         }
-        let bookmark = try url.bookmarkData()
-        selectedURL = url
+
+        // Commit the selection only after all validation succeeds. An invalid
+        // Files selection must not overwrite the previously valid bookmark.
+        let bookmark = try pickerURL.bookmarkData()
+        selectedURL = pickerURL
+        relativeBundlePath = selected.relativePath
         bookmarked = bookmark
-        UserDefaults.standard.set(bookmark, forKey: "vphone.usb.folder.bookmark")
+        UserDefaults.standard.set(bookmark, forKey: bookmarkKey)
+        UserDefaults.standard.set(selected.relativePath, forKey: relativePathKey)
         diskPath = disk.path
-        firmwareVersion = restored.map { "iOS \($0.ios.version) (\($0.ios.build)) + cloudOS \($0.cloudOS.version)" } ?? "Firmware restore information not recorded"
-        bundleSummary = "\(bundle.name) · \(bundle.manifest.cpuCount) CPU · \(bundle.manifest.memorySize / (1024 * 1024)) MB · \(firmwareVersion)"
+        firmwareVersion = Self.versionSummary(VPhoneRestoreInfo.load(fromBundle: bundle))
+        bundleSummary = Self.bundleSummary(bundle, firmwareVersion: firmwareVersion)
     }
 
     func beginAccess() -> URL? {
-        if let activeURL { return activeURL }
+        if let activeBundleURL { return activeBundleURL }
         guard let bookmarked else { return nil }
-        var stale = false
-        let url: URL
+
+        let root: URL
         if let selectedURL {
-            url = selectedURL
+            root = selectedURL
         } else {
-            guard let restored = try? URL(resolvingBookmarkData: bookmarked, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
+            var stale = false
+            guard let resolved = try? URL(resolvingBookmarkData: bookmarked, options: [],
+                                          relativeTo: nil, bookmarkDataIsStale: &stale),
                   !stale else { return nil }
-            url = restored
+            root = resolved
         }
-        let scoped = url.startAccessingSecurityScopedResource()
-        // App-owned local URLs do not require a scope; Files provider URLs do.
-        guard FileManager.default.isReadableFile(atPath: url.appendingPathComponent("config.plist").path),
-              let image = diskPath, FileManager.default.isReadableFile(atPath: image) else {
-            if scoped { url.stopAccessingSecurityScopedResource() }
+
+        let scope = root.startAccessingSecurityScopedResource()
+        let bundleURL = relativeBundlePath.isEmpty ? root
+            : root.appendingPathComponent(relativeBundlePath, isDirectory: true)
+        guard let bundle = try? VPhoneBundle.load(at: bundleURL),
+              Self.safeRelativeFileName(bundle.manifest.diskImage),
+              FileManager.default.isReadableFile(
+                atPath: bundleURL.appendingPathComponent(bundle.manifest.diskImage).path) else {
+            if scope { root.stopAccessingSecurityScopedResource() }
             return nil
         }
-        activeURL = url
-        acquiredAccess = scoped
-        return url
+        // Keep the actual root scope open for the entire VM lifetime. The
+        // resolved bundle path remains nested under that authorized root.
+        activeScopeURL = root
+        activeBundleURL = bundleURL
+        acquiredAccess = scope
+        diskPath = bundleURL.appendingPathComponent(bundle.manifest.diskImage).path
+        return bundleURL
     }
 
     func endAccess() {
-        if acquiredAccess { activeURL?.stopAccessingSecurityScopedResource() }
-        activeURL = nil
+        if acquiredAccess { activeScopeURL?.stopAccessingSecurityScopedResource() }
+        activeScopeURL = nil
+        activeBundleURL = nil
         acquiredAccess = false
+    }
+
+    private static func versionSummary(_ restore: VPhoneRestoreInfo?) -> String {
+        guard let restore else { return "Firmware restore information not recorded" }
+        return "iOS \(restore.ios.version) (\(restore.ios.build)) + cloudOS \(restore.cloudOS.version)"
+    }
+
+    private static func bundleSummary(_ bundle: VPhoneBundle,
+                                      firmwareVersion: String) -> String {
+        "\(bundle.name) · \(bundle.manifest.cpuCount) CPU · \(bundle.manifest.memorySize / (1024 * 1024)) MB · \(firmwareVersion)"
+    }
+
+    private static func safeRelativeFileName(_ name: String) -> Bool {
+        !name.isEmpty && !name.hasPrefix("/") && !name.contains("..")
+            && !name.contains("\\")
+    }
+
+    private struct Candidate {
+        let url: URL
+        let relativePath: String
+    }
+
+    /// Accept a VM folder directly, or discover a single immediate child with
+    /// config.plist when the user selected a USB root or a parent directory.
+    /// Never recursively crawl an entire USB disk or guess between multiple VMs.
+    private static func findBundle(in root: URL) throws -> Candidate {
+        let fm = FileManager.default
+        if fm.isReadableFile(atPath: root.appendingPathComponent("config.plist").path) {
+            return Candidate(url: root, relativePath: "")
+        }
+        let entries: [URL]
+        do {
+            entries = try fm.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles])
+        } catch {
+            throw VPhoneStorageError.directoryCannotBeListed(error.localizedDescription)
+        }
+
+        let folders = entries.filter {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }
+        let candidates = folders.filter {
+            fm.isReadableFile(atPath: $0.appendingPathComponent("config.plist").path)
+        }
+        if candidates.count == 1, let item = candidates.first {
+            return Candidate(url: item, relativePath: item.lastPathComponent)
+        }
+        if candidates.count > 1 {
+            throw VPhoneStorageError.multipleVMFolders(candidates.map(\.lastPathComponent))
+        }
+
+        let localFirmware = entries.filter {
+            ["ipsw", "partial"].contains($0.pathExtension.lowercased())
+        }.map(\.lastPathComponent)
+        // The app also saves firmware under a Files-visible Firmware directory.
+        // Detect it when selecting the parent, without scanning an entire drive.
+        let firmwareDirectories = folders.filter {
+            $0.lastPathComponent.lowercased() == "firmware"
+        }
+        let nestedFirmware = firmwareDirectories.flatMap { directory in
+            ((try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+                .filter { ["ipsw", "partial"].contains($0.pathExtension.lowercased()) }
+                .map(\.lastPathComponent)
+        }
+        let firmwareNames = localFirmware + nestedFirmware
+        if !firmwareNames.isEmpty {
+            throw VPhoneStorageError.firmwareOnly(firmwareNames)
+        }
+
+        let foldersWithDisk = folders.filter {
+            fm.fileExists(atPath: $0.appendingPathComponent("Disk.img").path)
+        }
+        if !foldersWithDisk.isEmpty {
+            throw VPhoneStorageError.diskWithoutManifest(foldersWithDisk.map(\.lastPathComponent))
+        }
+
+        throw VPhoneStorageError.noVMFolder(entries.prefix(6).map(\.lastPathComponent))
     }
 }
 
 enum VPhoneStorageError: LocalizedError {
     case invalidImagePath
     case missingDisk(String)
+    case unavailableFolder
+    case directoryCannotBeListed(String)
+    case multipleVMFolders([String])
+    case firmwareOnly([String])
+    case diskWithoutManifest([String])
+    case noVMFolder([String])
+
     var errorDescription: String? {
         switch self {
-        case .invalidImagePath: "Disk image path must stay inside the selected VM folder."
-        case let .missingDisk(name): "Missing disk image \(name) in the VM folder."
+        case .invalidImagePath:
+            return "The VM disk path escapes the selected folder."
+        case let .missingDisk(name):
+            return "The selected VM has config.plist but its disk \(name) is missing or inaccessible."
+        case .unavailableFolder:
+            return "The selected Files folder is no longer accessible. Reconnect USB and select the VM directory again."
+        case let .directoryCannotBeListed(message):
+            return "Cannot read this Files/USB directory: \(message). Check storage permissions or reconnect the drive."
+        case let .multipleVMFolders(names):
+            return "More than one prepared VPhone VM was found (\(names.prefix(4).joined(separator: ", "))). Select the specific VM folder containing config.plist."
+        case let .firmwareOnly(names):
+            return "Found firmware download files (\(names.prefix(3).joined(separator: ", "))), but no prepared VPhone VM. IPSW/cloudOS downloads are not directly bootable. This app still requires a restored VM folder with config.plist, Disk.img, NVRAM and ROM/SEP files. Prepare/restore the VM with upstream VPhone on a supported host first."
+        case let .diskWithoutManifest(names):
+            return "Found Disk.img inside \(names.prefix(3).joined(separator: ", ")) but no config.plist. The disk alone is not a bootable VPhone VM. Select a complete prepared bundle."
+        case let .noVMFolder(names):
+            let contents = names.isEmpty ? "This folder is empty." : "Visible items: \(names.joined(separator: ", "))."
+            return "No VPhone config.plist found in this folder or its immediate subfolders. \(contents) Select the folder containing a prepared config.plist and Disk.img, not just the downloaded IPSW."
         }
     }
 }

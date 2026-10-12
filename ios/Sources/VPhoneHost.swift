@@ -76,11 +76,12 @@ final class VPhoneHost: ObservableObject {
             try usb.select(url)
             state = .idle
             detail = "VPhone bundle: \(usb.bundleSummary). Disk remains on external storage."
-            storageStatus = "VM disk selected · direct USB access"
-            record("USB VM bundle opened: \(url.lastPathComponent)")
+            storageStatus = "Prepared VM selected · direct Files access"
+            record("Files VM bundle opened: \(url.lastPathComponent)")
         } catch {
             state = .failed
-            detail = "USB selection failed: \(error.localizedDescription)"
+            detail = "VM folder selection: \(error.localizedDescription)"
+            storageStatus = detail
             record(detail)
         }
         objectWillChange.send()

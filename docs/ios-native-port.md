@@ -215,3 +215,24 @@ returns an accurate error instead of a simulated iOS boot screen.
 Normal SideStore-signed iOS devices still have no verified authorization to
 run Apple's private PV=3 research guest VM, so a working SpringBoard guest
 has not been demonstrated on an iPhone 16.
+
+
+## USB folder selection and downloaded IPSW troubleshooting
+
+The iOS Files picker can return an external drive root or a parent directory.
+The app now checks for `config.plist` in the selected directory and its
+immediate subdirectories. When exactly one complete manifest folder exists,
+it chooses that folder while preserving the selected parent's authorized
+security scope and persistent bookmark. Multiple VM folders require explicit
+selection. A single disk file without a manifest is not silently treated as a
+VM.
+
+If the selection only contains `.ipsw` files or `Firmware/` download files,
+the app explains that **IPSW files are firmware archives, not prepared
+bootable VPhone virtual machines**. The required upstream firmware patching,
+DFU restore and VM disk creation steps have not yet been fully ported to iOS.
+Booting a real guest requires a prepared folder with `config.plist`,
+`Disk.img`, boot ROMs and SEP/NVRAM assets, plus an authorized PV=3 VM host.
+A Files LiveFiles/UserFSD path is a transient mount point, not evidence that
+an expected `config.plist` exists. The picker should report the missing VM
+setup rather than propagating a confusing Cocoa 260 exception.
