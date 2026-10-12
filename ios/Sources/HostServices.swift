@@ -14,6 +14,7 @@ final class ExternalVMBundle: ObservableObject {
     private var bookmarked: Data?
     private var activeURL: URL?
     private var acquiredAccess = false
+    private var selectedURL: URL?
 
     var isDiskAccessible: Bool {
         guard let activeURL, let diskPath else { return false }
@@ -45,6 +46,7 @@ final class ExternalVMBundle: ObservableObject {
             throw VPhoneStorageError.missingDisk(disk.lastPathComponent)
         }
         let bookmark = try url.bookmarkData()
+        selectedURL = url
         bookmarked = bookmark
         UserDefaults.standard.set(bookmark, forKey: "vphone.usb.folder.bookmark")
         diskPath = disk.path
@@ -56,14 +58,23 @@ final class ExternalVMBundle: ObservableObject {
         if let activeURL { return activeURL }
         guard let bookmarked else { return nil }
         var stale = false
-        guard let url = try? URL(resolvingBookmarkData: bookmarked, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
-              !stale, url.startAccessingSecurityScopedResource() else { return nil }
-        guard FileManager.default.isReadableFile(atPath: url.appendingPathComponent("config.plist").path) else {
-            url.stopAccessingSecurityScopedResource()
+        let url: URL
+        if let selectedURL {
+            url = selectedURL
+        } else {
+            guard let restored = try? URL(resolvingBookmarkData: bookmarked, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
+                  !stale else { return nil }
+            url = restored
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        // App-owned local URLs do not require a scope; Files provider URLs do.
+        guard FileManager.default.isReadableFile(atPath: url.appendingPathComponent("config.plist").path),
+              let image = diskPath, FileManager.default.isReadableFile(atPath: image) else {
+            if scoped { url.stopAccessingSecurityScopedResource() }
             return nil
         }
         activeURL = url
-        acquiredAccess = true
+        acquiredAccess = scoped
         return url
     }
 

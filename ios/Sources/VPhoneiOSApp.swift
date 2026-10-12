@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 @main
 struct VPhoneiOSApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var host = VPhoneHost()
 
     var body: some Scene {
@@ -11,6 +12,9 @@ struct VPhoneiOSApp: App {
             VPhoneHome()
                 .environmentObject(host)
                 .preferredColorScheme(.dark)
+                .onChange(of: scenePhase) { _, phase in
+                    host.handleScenePhase(phase)
+                }
         }
     }
 }
@@ -53,6 +57,7 @@ struct VPhoneHome: View {
                             .font(.footnote.monospaced())
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                        Text(host.guestBootStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
                         Text(host.guestFrameStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
                         Text(host.guestControlStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
                         Text(host.usb.firmwareVersion).font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -82,18 +87,21 @@ struct VPhoneHome: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(host.state == .starting || host.state == .running)
+                        .disabled(host.state == .starting || host.state == .running || host.state == .stopping || host.state == .stopUnconfirmed)
 
                         Button("Stop") { host.stop() }
                             .buttonStyle(.bordered)
-                            .disabled(host.state != .running)
+                            .disabled(host.state != .running && host.state != .stopUnconfirmed)
                     }
 
                     GroupBox("External USB · direct disk") {
                         VStack(alignment: .leading, spacing: 8) {
                             Button("Select VM folder on USB") { importingFolder = true }
                                 .buttonStyle(.bordered)
+                                .disabled(host.state == .running || host.state == .starting || host.state == .stopping || host.state == .stopUnconfirmed)
                             Text(host.storageStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Text("Do not unplug the external drive until VPhone confirms VM stopped. The disk is never copied into the IPA.")
+                                .font(.caption).foregroundStyle(.secondary)
                             Text("Select a prepared upstream vphone bundle with iBoot ROM, SEP ROM, NVRAM, Disk.img and config.plist. The real disk is read from USB in place.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)

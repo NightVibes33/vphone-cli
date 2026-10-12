@@ -8,12 +8,14 @@ import CoreImage
 @MainActor
 final class VPhoneHost: ObservableObject {
     enum State: Equatable {
-        case idle, starting, running, stopped, failed
+        case idle, starting, running, stopping, stopUnconfirmed, stopped, failed
         var label: String {
             switch self {
             case .idle: return "Ready for native VM launch"
             case .starting: return "Starting real virtual machine…"
-            case .running: return "VM started; awaiting guest framebuffer"
+            case .running: return "VM process started; guest boot unverified"
+            case .stopping: return "Guest shutdown in progress"
+            case .stopUnconfirmed: return "VM shutdown not confirmed — keep USB attached"
             case .stopped: return "VM stopped"
             case .failed: return "VM unavailable"
             }
@@ -30,6 +32,9 @@ final class VPhoneHost: ObservableObject {
     private let native = VPhoneNativeVM()
     private var events: [String] = []
     private var frameTimer: Timer?
+    private var bootTimer: Timer?
+    private var stopPollTimer: Timer?
+    private var stopWhenStarted = false
     private var guestConnectTask: Task<Void, Never>?
     private var usbMonitorTask: Task<Void, Never>?
     @Published private(set) var storageStatus = "No disk selected"
@@ -54,10 +59,15 @@ final class VPhoneHost: ObservableObject {
     private var screenshotCount = 0
     @Published private(set) var guestFrameStatus = "No guest framebuffer yet"
     @Published private(set) var guestControlStatus = "vphoned not connected"
+    @Published private(set) var guestBootStatus = "No VM started"
 
     init() { record("App started · \(ProcessInfo.processInfo.operatingSystemVersionString)") }
 
     func selectUSB(_ result: Result<URL, Error>) {
+        guard state != .running && state != .starting && state != .stopping && state != .stopUnconfirmed else {
+            storageStatus = "Stop the VM completely before changing its disk folder"
+            return
+        }
         do {
             let url = try result.get()
             try usb.select(url)
@@ -84,7 +94,10 @@ final class VPhoneHost: ObservableObject {
     }
 
     func start() {
-        guard state != .starting && state != .running else { return }
+        guard state != .starting && state != .running && state != .stopping && state != .stopUnconfirmed else { return }
+        stopWhenStarted = false
+        guestBootStatus = "Preparing real guest boot chain"
+        frames.clear()
         guard let bundleURL = usb.beginAccess() else {
             state = .failed
             detail = "Select an accessible VM folder (on USB or Files) first."
@@ -123,15 +136,26 @@ final class VPhoneHost: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
-                    self.usb.endAccess()
-                    self.state = .failed
+                    if self.native.isVMStopped() {
+                        self.usb.endAccess()
+                        self.state = .failed
+                    } else {
+                        self.state = .stopUnconfirmed
+                        self.beginStopVerification(reason: "Guest start error: \(error.localizedDescription)")
+                    }
                     self.detail = "Guest start failed: \(error.localizedDescription)"
                 } else {
+                    if self.stopWhenStarted {
+                        self.state = .running
+                        self.stop(reason: "Stopped because VPhone left the foreground during startup")
+                        return
+                    }
                     self.state = .running
                     self.detail = "Native VM started; awaiting actual guest boot frames."
                     self.startCapturingGuestFrames()
                     self.connectGuestDaemon()
                     self.monitorExternalStorage()
+                    self.startBootTracking()
                 }
                 self.record(self.detail)
             }
@@ -139,26 +163,103 @@ final class VPhoneHost: ObservableObject {
     }
 
     func stop(reason: String? = nil) {
+        guard state == .running || state == .stopUnconfirmed else { return }
+        state = .stopping
         usbMonitorTask?.cancel()
         usbMonitorTask = nil
         frameTimer?.invalidate()
         frameTimer = nil
+        bootTimer?.invalidate()
+        bootTimer = nil
         guestConnectTask?.cancel()
         guestConnectTask = nil
-        guestControlStatus = "vphoned disconnected"
+        guestControlStatus = "vphoned disconnect requested"
         guestApps = []
         guestAppsStatus = "Guest offline"
+        record("VM shutdown requested; USB security scope is retained until stopped")
         native.stop { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
-                self.usb.endAccess()
-                self.state = .stopped
-                self.detail = reason ?? error?.localizedDescription ?? "VM stopped"
-                self.record(self.detail)
+                if self.native.isVMStopped() {
+                    self.finalizeStopped(reason: reason)
+                } else {
+                    self.state = .stopUnconfirmed
+                    self.detail = "VM stop is not confirmed. Keep USB connected. \(error?.localizedDescription ?? "Waiting for VZ stopped state")"
+                    self.record(self.detail)
+                    self.beginStopVerification(reason: reason)
+                }
             }
         }
     }
 
+    private func beginStopVerification(reason: String?) {
+        stopPollTimer?.invalidate()
+        stopPollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.native.isVMStopped() {
+                    self.finalizeStopped(reason: reason)
+                }
+            }
+        }
+    }
+
+    private func finalizeStopped(reason: String?) {
+        stopPollTimer?.invalidate()
+        stopPollTimer = nil
+        usb.endAccess()
+        frames.clear()
+        guestBootStatus = "Guest stopped"
+        state = .stopped
+        detail = reason ?? "Virtual machine stopped; USB disk released"
+        record(detail)
+    }
+
+    /// A normal iOS app cannot be assumed to keep a writable VM disk alive
+    /// while suspended. Initiate shutdown rather than silently losing writes.
+    func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            if state == .starting {
+                stopWhenStarted = true
+                record("Backgrounded during start; will request stop immediately")
+            } else if state == .running {
+                stop(reason: "Requested shutdown on backgrounding to protect external VM disk")
+            }
+        default: break
+        }
+    }
+
+    private func startBootTracking() {
+        bootTimer?.invalidate()
+        guestBootStatus = "Native VM started; scanning actual guest serial output"
+        bootTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.state == .running else { return }
+                let serial = self.native.serialLogSnapshot()
+                if serial.isEmpty { return }
+                let tail = String(serial.suffix(16_000))
+                let range = NSRange(tail.startIndex..<tail.endIndex, in: tail)
+                let panic = try? NSRegularExpression(pattern: VPhoneBootPatterns.panicRegex,
+                                                      options: .caseInsensitive)
+                if panic?.firstMatch(in: tail, range: range) != nil {
+                    if self.guestBootStatus != "Kernel panic detected in real guest serial log" {
+                        self.guestBootStatus = "Kernel panic detected in real guest serial log"
+                        self.record(self.guestBootStatus)
+                    }
+                    return
+                }
+                let prompt = try? NSRegularExpression(pattern: VPhoneBootPatterns.promptRegex)
+                if prompt?.firstMatch(in: tail, range: range) != nil &&
+                   self.guestBootStatus != "Real guest shell prompt detected" {
+                    self.guestBootStatus = "Real guest shell prompt detected"
+                    self.record(self.guestBootStatus)
+                } else if self.guestBootStatus.hasPrefix("Native VM started") {
+                    self.guestBootStatus = "Real guest serial output received; SpringBoard not confirmed"
+                }
+            }
+        }
+    }
 
 
     enum HardwareKey: String, CaseIterable {
@@ -306,6 +407,7 @@ final class VPhoneHost: ObservableObject {
                 guard self.state == .running, !Task.isCancelled else { return }
                 self.guestControlStatus = status
                 if status.hasPrefix("vphoned:") {
+                    self.guestBootStatus = "Guest vphoned connected — system services running; UI boot not yet confirmed"
                     self.record("Real guest vphoned VSOCK handshake established")
                     self.refreshGuestApps()
                     return
@@ -333,6 +435,10 @@ final class VPhoneHost: ObservableObject {
                         self.screenshotCount += 1
                         if self.screenshotCount % 30 == 1 {
                             self.guestFrameStatus = "Real guest frames received: \(self.screenshotCount)"
+                        if self.guestBootStatus.hasPrefix("Native VM started") ||
+                           self.guestBootStatus.contains("SpringBoard not confirmed") {
+                            self.guestBootStatus = "Guest display active; SpringBoard identification pending"
+                        }
                         }
                     }
                 }
@@ -377,6 +483,7 @@ final class VPhoneHost: ObservableObject {
         \(events.joined(separator: "\n"))
         Guest frames: \(screenshotCount)
         Guest RPC: \(guestControlStatus)
+        Guest boot: \(guestBootStatus)
         Guest apps: \(guestAppsStatus)
         Guest installer: \(guestIPAStatus)
         Guest serial tail:

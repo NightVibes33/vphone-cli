@@ -7,10 +7,29 @@ import CoreVideo
 final class GuestFrameStore: @unchecked Sendable {
     private let lock = NSLock()
     private var latestFrame: CVPixelBuffer?
-    func submitGuestFrame(_ buffer: CVPixelBuffer) {
+    private var frameListener: (() -> Void)?
+
+    func setFrameListener(_ listener: (() -> Void)?) {
         lock.lock(); defer { lock.unlock() }
-        latestFrame = buffer
+        frameListener = listener
     }
+
+    func submitGuestFrame(_ buffer: CVPixelBuffer) {
+        lock.lock()
+        latestFrame = buffer
+        let callback = frameListener
+        lock.unlock()
+        callback?()
+    }
+
+    func clear() {
+        lock.lock()
+        latestFrame = nil
+        let callback = frameListener
+        lock.unlock()
+        callback?()
+    }
+
     func currentFrame() -> CVPixelBuffer? {
         lock.lock(); defer { lock.unlock() }
         return latestFrame
@@ -28,10 +47,15 @@ struct MetalGuestView: UIViewRepresentable {
     func makeUIView(context: Context) -> MTKView {
         let view = GuestTouchMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.onGuestTouch = onTouch
+        view.frameStore = frameStore
+        frameStore.setFrameListener { [weak view] in
+            DispatchQueue.main.async { view?.setNeedsDisplay() }
+        }
         view.colorPixelFormat = .bgra8Unorm
         view.preferredFramesPerSecond = 60
-        view.isPaused = false
-        view.enableSetNeedsDisplay = false
+        // Only submit Metal work when a real VM image changes.
+        view.isPaused = true
+        view.enableSetNeedsDisplay = true
         view.clearColor = MTLClearColorMake(0, 0, 0, 1)
         view.delegate = context.coordinator
         return view
@@ -60,7 +84,9 @@ final class MetalFrameRenderer: NSObject, MTKViewDelegate {
         super.init()
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        DispatchQueue.main.async { [weak view] in view?.setNeedsDisplay() }
+    }
 
     func draw(in view: MTKView) {
         guard let drawable = view.currentDrawable,
@@ -96,11 +122,24 @@ final class MetalFrameRenderer: NSObject, MTKViewDelegate {
 /// Real multi-touch events route into upstream vphoned guest-side HID injection.
 final class GuestTouchMTKView: MTKView {
     var onGuestTouch: ((Int, Double, Double) -> Void)?
+    var frameStore: GuestFrameStore?
     private func send(_ touches: Set<UITouch>, phase: Int) {
-        guard let touch = touches.first, bounds.width > 0, bounds.height > 0 else { return }
-        let p = touch.location(in: self)
-        let x = min(1, max(0, Double(p.x / bounds.width)))
-        let y = min(1, max(0, Double(p.y / bounds.height)))
+        guard let touch = touches.first, bounds.width > 0, bounds.height > 0,
+              let buffer = frameStore?.currentFrame() else { return }
+        let sourceWidth = CGFloat(CVPixelBufferGetWidth(buffer))
+        let sourceHeight = CGFloat(CVPixelBufferGetHeight(buffer))
+        guard sourceWidth > 0, sourceHeight > 0 else { return }
+        let scale = min(bounds.width / sourceWidth, bounds.height / sourceHeight)
+        let display = CGRect(
+            x: (bounds.width - sourceWidth * scale) / 2,
+            y: (bounds.height - sourceHeight * scale) / 2,
+            width: sourceWidth * scale, height: sourceHeight * scale)
+        let position = touch.location(in: self)
+        // Ignore black letterbox bars. Still deliver a release outside the
+        // framebuffer so the guest never gets a permanently pressed finger.
+        if phase != 3 && !display.contains(position) { return }
+        let x = min(1, max(0, Double((position.x - display.minX) / display.width)))
+        let y = min(1, max(0, Double((position.y - display.minY) / display.height)))
         onGuestTouch?(phase, x, y)
     }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {

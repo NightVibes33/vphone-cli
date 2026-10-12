@@ -126,3 +126,17 @@ IPA registration from the daemon, and launch guest bundle identifiers.
 Those controls stay inert before the guest connects. The host does not
 sideload IPA content into its own iOS app container as a substitute for the
 virtual device.
+
+## Boot accuracy and USB safety
+
+- Validates PV=3 isSupported before attempting boot; fails if hardware/entitlement authorization is absent.
+- Persists generated machineIdentifier in config.plist so guest ECID remains stable across launches.
+- Configures serial NVRAM boot args and requires guest SEP and display devices rather than silently skipping them.
+- Uses original VPhoneBootPatterns to identify actual guest shell prompts and kernel panics in the PL011 serial log.
+- Treats VZ VM start, guest serial activity, guest daemon connection, and display frames as separate states, not equivalent to a successful SpringBoard boot.
+- Never releases a USB VM disk merely because a guest shutdown was requested. If stop is unconfirmed, retain the security-scope grant and poll the real VZ stopped state.
+- On iOS background entry, requests guest shutdown because ordinary IPAs cannot remain indefinitely active.
+- Draws new Metal frames only on actual guest image updates. Touch input is mapped into the aspect-fitted guest image rather than its letterbox borders.
+- Allows app-owned Files URLs without requiring a security-scope grant when the files are already accessible.
+
+These changes improve the native host but do NOT establish authorized PV=3 virtualization on a stock iPhone or demonstrate iOS 27 SpringBoard boot.

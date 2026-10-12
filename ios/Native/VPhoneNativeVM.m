@@ -103,6 +103,13 @@ static id Get(id target, NSString *key) {
             if (error) *error = Failure(5, @"PV=3 research hardware model denied/missing.");
             return NO;
         }
+        SEL supportedSelector = NSSelectorFromString(@"isSupported");
+        BOOL pv3Supported = [model respondsToSelector:supportedSelector] &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(model, supportedSelector);
+        if (!pv3Supported) {
+            if (error) *error = Failure(5, @"PV=3 hardware model is unsupported or denied by iOS virtualization entitlements.");
+            return NO;
+        }
 
         id platform = Make(@"VZMacPlatformConfiguration");
         id identifier = nil;
@@ -111,7 +118,26 @@ static id Get(id target, NSString *key) {
         if ([saved isKindOfClass:NSData.class] && saved.length) {
             identifier = Call([identifierClass alloc], @"initWithDataRepresentation:", saved);
         }
+        BOOL generatedIdentifier = identifier == nil;
         if (!identifier) identifier = Make(@"VZMacMachineIdentifier");
+        if (generatedIdentifier) {
+            // Persist the guest ECID across restarts, matching upstream.
+            NSData *representation = Get(identifier, @"dataRepresentation");
+            if (![representation isKindOfClass:NSData.class] || !representation.length) {
+                if (error) *error = Failure(23, @"Could not serialize persistent VM identity.");
+                return NO;
+            }
+            NSMutableDictionary *updated = [manifest mutableCopy];
+            updated[@"machineIdentifier"] = representation;
+            NSError *persistError = nil;
+            NSData *plist = [NSPropertyListSerialization dataWithPropertyList:updated
+                                    format:NSPropertyListXMLFormat_v1_0 options:0 error:&persistError];
+            NSURL *configURL = [bundleURL URLByAppendingPathComponent:@"config.plist"];
+            if (!plist || ![plist writeToURL:configURL options:NSDataWritingAtomic error:&persistError]) {
+                if (error) *error = persistError ?: Failure(24, @"Cannot save persistent guest identity to USB.");
+                return NO;
+            }
+        }
         if (!Set(platform, @"hardwareModel", model) ||
             !Set(platform, @"machineIdentifier", identifier)) {
             if (error) *error = Failure(6, @"Guest Mac platform/ECID API unavailable.");
@@ -140,6 +166,13 @@ static id Get(id target, NSString *key) {
         if (!Set(platform, @"auxiliaryStorage", aux)) {
             if (error) *error = Failure(8, @"NVRAM auxiliary storage API unavailable.");
             return NO;
+        }
+        SEL bootArgSelector = NSSelectorFromString(@"_setDataValue:forNVRAMVariableNamed:error:");
+        if ([aux respondsToSelector:bootArgSelector]) {
+            NSData *args = [@"serial=3 debug=0x104c04" dataUsingEncoding:NSUTF8StringEncoding];
+            NSError *bootArgError = nil;
+            ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(
+                aux, bootArgSelector, args, @"boot-args", &bootArgError);
         }
 
         NSDictionary *roms = manifest[@"romImages"];
@@ -208,8 +241,10 @@ static id Get(id target, NSString *key) {
             display = ((id (*)(id, SEL, NSInteger, NSInteger, NSInteger))objc_msgSend)(
                 [displayClass alloc], displayInit, width, height, ppi);
         }
-        if (gfx && display && Set(gfx, @"displays", @[display])) {
-            Set(config, @"graphicsDevices", @[gfx]);
+        if (!gfx || !display || !Set(gfx, @"displays", @[display]) ||
+            !Set(config, @"graphicsDevices", @[gfx])) {
+            if (error) *error = Failure(25, @"Required virtual graphics device not accessible on this host.");
+            return NO;
         }
 
         id nat = Make(@"VZNATNetworkDeviceAttachment");
@@ -235,7 +270,17 @@ static id Get(id target, NSString *key) {
             if (sep && SafeName(sepRom)) {
                 Call(sep, @"setRomBinaryURL:", [bundleURL URLByAppendingPathComponent:sepRom]);
             }
-            if (sep) Call(config, @"_setCoprocessors:", @[sep]);
+            if (!sep || !SafeName(sepRom) ||
+                ![[NSFileManager defaultManager] fileExistsAtPath:
+                      [[bundleURL URLByAppendingPathComponent:sepRom] path]] ||
+                ![config respondsToSelector:NSSelectorFromString(@"_setCoprocessors:")]) {
+                if (error) *error = Failure(26, @"Required guest SEP ROM/coprocessor API is unavailable.");
+                return NO;
+            }
+            Call(config, @"_setCoprocessors:", @[sep]);
+        } else {
+            if (error) *error = Failure(27, @"Invalid guest SEP storage path.");
+            return NO;
         }
 
 
@@ -342,6 +387,8 @@ static id Get(id target, NSString *key) {
         id options = Make(@"VZMacOSVirtualMachineStartOptions");
         if (options && [self.virtualMachine respondsToSelector:sel]) {
             Call(options, @"_setForceDFU:", @(NO));
+            Call(options, @"_setStopInIBootStage1:", @(NO));
+            Call(options, @"_setStopInIBootStage2:", @(NO));
             ((void (*)(id, SEL, id, id))objc_msgSend)(self.virtualMachine, sel, options, [completion copy]);
         } else {
             ((void (*)(id, SEL, id))objc_msgSend)(self.virtualMachine, plain, [completion copy]);

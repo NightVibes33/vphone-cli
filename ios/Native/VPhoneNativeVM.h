@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)connectGuestControlWithCompletion:(void (^)(NSString *status))completion;
 - (BOOL)sendHIDPressWithPage:(uint32_t)page usage:(uint32_t)usage;
 - (NSString *)serialLogSnapshot;
+- (BOOL)isVMStopped;
 - (void)listGuestAppsWithCompletion:(void (^)(NSArray<NSDictionary *> * _Nullable apps, NSError * _Nullable error))completion;
 - (void)launchGuestApp:(NSString *)bundleID completion:(void (^)(NSString * _Nullable message, NSError * _Nullable error))completion;
 - (void)installGuestIPAAtURL:(NSURL *)url
