@@ -35,6 +35,7 @@ final class VPhoneHost: ObservableObject {
     private var bootTimer: Timer?
     private var stopPollTimer: Timer?
     private var stopWhenStarted = false
+    private var shutdownBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var guestConnectTask: Task<Void, Never>?
     private var usbMonitorTask: Task<Void, Never>?
     @Published private(set) var storageStatus = "No disk selected"
@@ -138,6 +139,7 @@ final class VPhoneHost: ObservableObject {
                 if let error {
                     if self.native.isVMStopped() {
                         self.usb.endAccess()
+                        self.endBackgroundShutdownWindow()
                         self.state = .failed
                     } else {
                         self.state = .stopUnconfirmed
@@ -205,6 +207,7 @@ final class VPhoneHost: ObservableObject {
     }
 
     private func finalizeStopped(reason: String?) {
+        endBackgroundShutdownWindow()
         stopPollTimer?.invalidate()
         stopPollTimer = nil
         usb.endAccess()
@@ -220,14 +223,39 @@ final class VPhoneHost: ObservableObject {
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .background:
+            if state == .starting || state == .running || state == .stopUnconfirmed {
+                beginBackgroundShutdownWindow()
+            }
             if state == .starting {
                 stopWhenStarted = true
                 record("Backgrounded during start; will request stop immediately")
-            } else if state == .running {
+            } else if state == .running || state == .stopUnconfirmed {
                 stop(reason: "Requested shutdown on backgrounding to protect external VM disk")
             }
         default: break
         }
+    }
+
+    private func beginBackgroundShutdownWindow() {
+        guard shutdownBackgroundTask == .invalid else { return }
+        shutdownBackgroundTask = UIApplication.shared.beginBackgroundTask(
+            withName: "VPhone External Disk Shutdown",
+            expirationHandler: { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if !self.native.isVMStopped() {
+                        self.storageStatus = "VM shutdown could not complete before suspension — keep USB connected"
+                        self.record(self.storageStatus)
+                    }
+                    self.endBackgroundShutdownWindow()
+                }
+            })
+    }
+
+    private func endBackgroundShutdownWindow() {
+        guard shutdownBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(shutdownBackgroundTask)
+        shutdownBackgroundTask = .invalid
     }
 
     private func startBootTracking() {
