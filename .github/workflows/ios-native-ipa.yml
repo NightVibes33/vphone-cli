@@ -6,6 +6,7 @@ on:
     branches: [main, ios27-native-integration]
     paths:
       - 'ios/**'
+      - 'sources/VPhoneCore/**'
       - '.github/workflows/ios-native-ipa.yml'
 
 permissions:
