@@ -44,7 +44,7 @@ final class ExternalVMBundle: ObservableObject {
                     : root.appendingPathComponent(relativeBundlePath, isDirectory: true)
                 let scope = root.startAccessingSecurityScopedResource()
                 if let loaded = try? VPhoneBundle.load(at: bundle) {
-                    diskPath = bundle.url.appendingPathComponent(loaded.manifest.diskImage).path
+                    diskPath = bundle.appendingPathComponent(loaded.manifest.diskImage).path
                     firmwareVersion = Self.versionSummary(
                         VPhoneRestoreInfo.load(fromBundle: loaded))
                     bundleSummary = Self.bundleSummary(loaded, firmwareVersion: firmwareVersion)
