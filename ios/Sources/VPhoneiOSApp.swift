@@ -54,10 +54,10 @@ struct VPhoneHome: View {
         }
     }
 
-    private func prepareFromDownloadedFirmware(onUSB folder: URL) {
+    private func prepareFromDownloadedFirmware(onUSB folder: URL) async {
         guard firmware.pairings.indices.contains(firmware.selection) else { return }
-        if provisioner.createBundle(onUSB: folder,
-                                    pairing: firmware.pairings[firmware.selection]) != nil {
+        if await provisioner.createBundle(onUSB: folder,
+                                          pairing: firmware.pairings[firmware.selection]) != nil {
             host.selectUSB(.success(folder))
         }
     }
@@ -151,14 +151,18 @@ struct VPhoneHome: View {
                 }
             }
         case .disk:
-            usbSetupStatus = "Step 4/4: create 32 GiB VM Disk.img directly on USB…"
-            if let vm = provisioner.createBundle(onUSB: root, pairing: selected) {
-                host.selectUSB(.success(root))
-                usbSetupStatus = "USB complete: iOS IPSW, cloudOS IPSW, verified research ROMs, config.plist and 32 GiB Disk.img in \(vm.lastPathComponent). The disk is UNRESTORED: it is not yet a downloaded or bootable iOS installation."
-                setupPhase = .done
-            } else {
-                usbSetupStatus = provisioner.status
-                setupPhase = .failed
+            guard !provisioner.creatingBundle else { return }
+            usbSetupStatus = "Step 4/4: creating 32 GiB Disk.img directly on USB (may be slow on exFAT)…"
+            Task {
+                let vm = await provisioner.createBundle(onUSB: root, pairing: selected)
+                if let vm {
+                    host.selectUSB(.success(root))
+                    usbSetupStatus = "USB complete: both firmware archives, verified ROMs, config.plist and 32 GiB Disk.img are on the selected drive in \(vm.lastPathComponent). UNRESTORED — an empty VM disk is not a bootable iOS 27 installation."
+                    setupPhase = .done
+                } else {
+                    usbSetupStatus = provisioner.status
+                    setupPhase = .failed
+                }
             }
         case .idle, .done, .failed:
             break
@@ -276,7 +280,7 @@ struct VPhoneHome: View {
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(firmware.isDownloading || romDownload.downloading ||
+                            .disabled(firmware.isDownloading || romDownload.downloading || provisioner.creatingBundle ||
                                       host.state == .running || host.state == .starting ||
                                       host.state == .stopping)
                             Text(usbSetupStatus)
@@ -441,12 +445,16 @@ struct VPhoneHome: View {
                             Text("Uses the actual upstream VPhoneBundleOps.create, the iOS/cloudOS IPSWs and the verified ROMs already on the same USB drive. The VM disk, SEP files and config.plist are created on USB.")
                                 .font(.caption).foregroundStyle(.secondary)
                             Button("Create VM bundle on USB") {
-                                if let root = workspace.root { prepareFromDownloadedFirmware(onUSB: root) }
+                                if let root = workspace.root { Task { await prepareFromDownloadedFirmware(onUSB: root) } }
                                 else { importingVMStorageFolder = true }
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(firmware.isDownloading || firmware.pairings.isEmpty ||
-                                      romDownload.downloading)
+                                      romDownload.downloading || provisioner.creatingBundle)
+                            if provisioner.creatingBundle {
+                                ProgressView("Creating 32 GiB USB Disk.img…")
+                                    .font(.caption)
+                            }
                             Text(provisioner.status)
                                 .font(.caption.monospaced())
                                 .textSelection(.enabled)
@@ -568,7 +576,7 @@ struct VPhoneHome: View {
             }
             .fileImporter(isPresented: $importingVMStorageFolder, allowedContentTypes: [.folder]) { result in
                 if case let .success(folder) = result {
-                    prepareFromDownloadedFirmware(onUSB: folder)
+                    Task { await prepareFromDownloadedFirmware(onUSB: folder) }
                 }
             }
             .fileImporter(isPresented: $importingFirmwareFolder, allowedContentTypes: [.folder]) { result in

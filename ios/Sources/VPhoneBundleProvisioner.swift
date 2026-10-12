@@ -8,8 +8,13 @@ import CryptoKit
 final class VPhoneBundleProvisioner: ObservableObject {
     @Published private(set) var status = "Select the USB folder containing Firmware and extracted host ROMs."
     @Published private(set) var createdBundleURL: URL?
+    @Published private(set) var creatingBundle = false
 
-    func createBundle(onUSB root: URL, pairing: VPhoneFirmwarePairing) -> URL? {
+    func createBundle(onUSB root: URL, pairing: VPhoneFirmwarePairing) async -> URL? {
+        guard !creatingBundle else { return nil }
+        creatingBundle = true
+        defer { creatingBundle = false }
+        status = "Checking real USB inputs and creating the 32 GiB disk image on USB…"
         let scope = root.startAccessingSecurityScopedResource()
         defer { if scope { root.stopAccessingSecurityScopedResource() } }
         do {
@@ -45,14 +50,10 @@ final class VPhoneBundleProvisioner: ObservableObject {
             // Only accept the exact two unmodified ROMs from the runner ZIP.
             try validateROMs(in: romFolder)
 
-            // A sparse image has 32 GiB logical capacity, not 32 GiB of
-            // downloaded OS content. Ensure USB has room for real disk writes
-            // before creating a potentially large exFAT/APFS image.
-            if let free = try? root.resourceValues(forKeys:
-                [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,
-               free > 0 && free < Int64(34) * 1024 * 1024 * 1024 {
-                throw ProvisionError.notEnoughStorage(free)
-            }
+            // Files' LiveFiles/UserFSD may report iPhone free space for a
+            // mounted external drive. Do not reject genuine USB storage based
+            // on an incorrect host-volume capacity reading. The actual create
+            // and later restore writes will report ENOSPC if the USB is full.
 
             let libraryRoot = root.appendingPathComponent("VMs", isDirectory: true)
             try fm.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
@@ -62,7 +63,12 @@ final class VPhoneBundleProvisioner: ObservableObject {
                 name: vmName, cpuCount: 4, memoryMB: 3072, diskSizeGB: 32,
                 romSource: romFolder.appendingPathComponent("AVPBooter.vresearch1.bin"),
                 sepromSource: romFolder.appendingPathComponent("AVPSEPBooter.vresearch1.bin"))
-            let bundle = try VPhoneBundleOps.create(spec, in: VPhoneLibrary(root: libraryRoot))
+            // exFAT and third-party Files providers can make a 32 GiB
+            // ftruncate expensive. Run the original upstream disk constructor
+            // on a utility thread instead of freezing the iPhone UI.
+            let bundle = try await Task.detached(priority: .utility) {
+                try VPhoneBundleOps.create(spec, in: VPhoneLibrary(root: libraryRoot))
+            }.value
             // Verify the physical disk file was created at the USB destination
             // and that its logical size is exactly the requested 32 GiB.
             let diskURL = bundle.url.appendingPathComponent("Disk.img")
