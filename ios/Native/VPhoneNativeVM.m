@@ -39,6 +39,7 @@ static id Get(id target, NSString *key) {
 @property (nonatomic, strong) id guestSocketConnection;
 @property (nonatomic, assign) int guestControlFD;
 @property (nonatomic, assign) BOOL guestControlReady;
+@property (atomic, assign) BOOL guestTransferActive;
 @property (nonatomic, strong) NSPipe *serialInput;
 @property (nonatomic, strong) NSPipe *serialOutput;
 @property (nonatomic, strong) NSMutableString *serialBuffer;
@@ -62,6 +63,7 @@ static id Get(id target, NSString *key) {
     self.guestSocketConnection = nil;
     self.guestControlFD = -1;
     self.guestControlReady = NO;
+    self.guestTransferActive = NO;
     self.guestPending = [NSMutableDictionary dictionary];
     self.serialOutput.fileHandleForReading.readabilityHandler = nil;
     self.serialInput = nil;
@@ -608,6 +610,7 @@ static id Get(id target, NSString *key) {
 
     BOOL success = YES;
     int fd = self.guestControlFD;
+    self.guestTransferActive = YES;
     @synchronized(self) {
         if (!self.guestControlReady || fd < 0) {
             success = NO;
@@ -633,6 +636,7 @@ static id Get(id target, NSString *key) {
             }
         }
     }
+    self.guestTransferActive = NO;
     [handle closeFile];
     if (!success) {
         void (^cb)(NSDictionary *) = nil;
@@ -692,20 +696,28 @@ static id Get(id target, NSString *key) {
     }
 }
 - (BOOL)sendHIDPressWithPage:(uint32_t)page usage:(uint32_t)usage {
-    if (!self.guestControlReady || self.guestControlFD < 0) return NO;
-    // Exact vphoned HID command format, identical to upstream VPhoneKeyHelper.
-    return [self sendGuestMessage:@{@"v": @1, @"t": @"hid",
-                                    @"id": NSUUID.UUID.UUIDString,
-                                    @"page": @(page), @"usage": @(usage)}];
+    if (!self.guestControlReady || self.guestControlFD < 0 || self.guestTransferActive) return NO;
+    // Do not block UIKit while a large IPA holds the VSOCK writer.
+    NSDictionary *message = @{@"v": @1, @"t": @"hid",
+                              @"id": NSUUID.UUID.UUIDString,
+                              @"page": @(page), @"usage": @(usage)};
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (!self.guestTransferActive) [self sendGuestMessage:message];
+    });
+    return YES;
 }
 
 - (BOOL)sendTouchWithPhase:(NSInteger)phase x:(double)x y:(double)y {
-    if (!self.guestControlReady || self.guestControlFD < 0) return NO;
-    return [self sendGuestMessage:@{@"v": @1, @"t": @"touch",
-                                    @"id": NSUUID.UUID.UUIDString,
-                                    @"phase": @(phase),
-                                    @"x": @(MAX(0.0, MIN(1.0, x))),
-                                    @"y": @(MAX(0.0, MIN(1.0, y)))}];
+    if (!self.guestControlReady || self.guestControlFD < 0 || self.guestTransferActive) return NO;
+    NSDictionary *message = @{@"v": @1, @"t": @"touch",
+                              @"id": NSUUID.UUID.UUIDString,
+                              @"phase": @(phase),
+                              @"x": @(MAX(0.0, MIN(1.0, x))),
+                              @"y": @(MAX(0.0, MIN(1.0, y)))};
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        if (!self.guestTransferActive) [self sendGuestMessage:message];
+    });
+    return YES;
 }
 
 - (void)stopWithCompletion:(void (^)(NSError * _Nullable))completion {
