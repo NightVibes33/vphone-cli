@@ -1,23 +1,51 @@
 import Foundation
 import Combine
 
-/// Apple IPSW/cloudOS downloads stream directly to a user-selected USB folder.
-/// The in-progress archive never enters the app's Documents/Caches directory.
-/// This stages original firmware; it does NOT perform a restore or create a VM.
+/// Apple IPSW/cloudOS firmware streams directly into the destination chosen by
+/// the user: the app's Files-visible Documents/Firmware directory, or an
+/// external USB folder provided by the Files picker. No staging copy is made.
+/// This stages original firmware; it does NOT restore or boot a guest VM.
 @MainActor
 final class VPhoneFirmwareStager: ObservableObject {
     enum Kind { case ios, cloudOS }
+    enum Destination {
+        case onDevice
+        case chosenFolder(URL)
+    }
+
     @Published var selection: Int = 0
-    @Published private(set) var status = "Select an iOS 27 firmware and a USB destination."
+    @Published private(set) var status = "Choose On My iPhone or USB drive, then select firmware."
     @Published private(set) var isDownloading = false
     @Published private(set) var progress: Double = 0
+    @Published private(set) var destinationDescription = "No download in progress"
+    @Published private(set) var onDeviceFiles: [URL] = []
 
     let pairings = VPhoneFirmwareCatalog.pairings.filter { $0.iosName.hasPrefix("iOS 27") }
-    private var transfer: DirectUSBTransfer?
+    private var transfer: DirectFirmwareTransfer?
 
-    init() { selection = max(0, pairings.count - 1) }
+    static var onDeviceFolder: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Firmware", isDirectory: true)
+    }
 
-    func download(_ kind: Kind, folder: URL) {
+    init() {
+        selection = max(0, pairings.count - 1)
+        refreshOnDeviceFiles()
+    }
+
+    func refreshOnDeviceFiles() {
+        let folder = Self.onDeviceFolder
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        onDeviceFiles = entries.filter {
+            $0.pathExtension.lowercased() == "ipsw" || $0.pathExtension.lowercased() == "partial"
+        }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    func download(_ kind: Kind, destination: Destination) {
         guard !isDownloading, pairings.indices.contains(selection) else { return }
         let pairing = pairings[selection]
         let remoteString = kind == .ios ? pairing.iosURL : pairing.cloudosURL
@@ -29,8 +57,25 @@ final class VPhoneFirmwareStager: ObservableObject {
         let fileName = kind == .ios
             ? "\(pairing.iosName.replacingOccurrences(of: " ", with: "-"))-iPhone17,3.ipsw"
             : "\(pairing.cloudosName.replacingOccurrences(of: " ", with: "-"))-cloudOS.ipsw"
+        let folder: URL
+        let destinationLabel: String
+        switch destination {
+        case .onDevice:
+            folder = Self.onDeviceFolder
+            destinationLabel = "On My iPhone → VPhone → Firmware"
+        case .chosenFolder(let chosen):
+            folder = chosen
+            destinationLabel = "Selected Files folder: \(chosen.lastPathComponent)"
+        }
         do {
-            let downloader = DirectUSBTransfer(
+            if case .onDevice = destination {
+                try FileManager.default.createDirectory(
+                    at: folder, withIntermediateDirectories: true)
+            }
+            // Each location has its own .partial download. Never resume from
+            // another storage location or silently copy the firmware between them.
+            destinationDescription = destinationLabel
+            let downloader = DirectFirmwareTransfer(
                 remote: remote, folder: folder, fileName: fileName,
                 report: { [weak self] bytes, expected in
                     Task { @MainActor in
@@ -38,7 +83,7 @@ final class VPhoneFirmwareStager: ObservableObject {
                         if expected > 0 {
                             self.progress = min(1, Double(bytes) / Double(expected))
                         }
-                        self.status = "USB firmware: \(bytes / 1_048_576) MB received"
+                        self.status = "\(destinationLabel): \(bytes / 1_048_576) MB received"
                             + (expected > 0 ? " / \(expected / 1_048_576) MB" : "")
                     }
                 },
@@ -47,23 +92,24 @@ final class VPhoneFirmwareStager: ObservableObject {
                         guard let self else { return }
                         self.isDownloading = false
                         self.transfer = nil
+                        self.refreshOnDeviceFiles()
                         switch result {
                         case .success(let url):
                             self.progress = 1
-                            self.status = "Firmware saved on USB: \(url.lastPathComponent). Guest restore remains required."
+                            self.status = "Saved \(url.lastPathComponent) to \(destinationLabel). Guest restore remains required."
                         case .failure(let error):
-                            self.status = "Download interrupted: \(error.localizedDescription). Partial file stays on USB for resume."
+                            self.status = "Download interrupted: \(error.localizedDescription). Partial file remains in \(destinationLabel) for resume."
                         }
                     }
                 })
             transfer = downloader
             isDownloading = true
-            status = "Streaming \(fileName) to USB; keep VPhone foregrounded and the drive attached."
+            status = "Streaming \(fileName) to \(destinationLabel). Keep VPhone foregrounded\(destinationLabel.hasPrefix("Selected") ? " and USB connected" : "")."
             try downloader.start()
         } catch {
             transfer = nil
             isDownloading = false
-            status = "Cannot start USB download: \(error.localizedDescription)"
+            status = "Cannot start download to \(destinationLabel): \(error.localizedDescription)"
         }
     }
 
@@ -74,7 +120,7 @@ final class VPhoneFirmwareStager: ObservableObject {
 
 /// URLSessionDataDelegate callback queue is serial, so large archives are written
 /// incrementally in received chunks rather than via a full-RAM/data cache.
-private final class DirectUSBTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+private final class DirectFirmwareTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let remote: URL
     private let folder: URL
     private let fileName: String
@@ -100,20 +146,27 @@ private final class DirectUSBTransfer: NSObject, URLSessionDataDelegate, @unchec
         self.report = report
         self.finish = finish
         let queue = OperationQueue()
-        queue.name = "vphone.usb.firmware.serial"
+        queue.name = "vphone.firmware.destination.serial"
         queue.maxConcurrentOperationCount = 1
         delegateQueue = queue
     }
 
     func start() throws {
+        // For app-owned Documents the scope can be false and writing still works.
+        // Files-provider destinations require the scope granted by the picker.
         scopeAcquired = folder.startAccessingSecurityScopedResource()
         do {
+            let finalURL = folder.appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: finalURL.path) {
+                throw NSError(domain: "VPhoneFirmware", code: 7,
+                              userInfo: [NSLocalizedDescriptionKey: "Firmware is already saved in this location. Choose a different folder or delete the existing file."])
+            }
             let target = folder.appendingPathComponent(fileName + ".partial")
             partial = target
             if !FileManager.default.fileExists(atPath: target.path) {
                 guard FileManager.default.createFile(atPath: target.path, contents: nil) else {
                     throw NSError(domain: "VPhoneFirmware", code: 1,
-                                  userInfo: [NSLocalizedDescriptionKey: "USB destination is not writable"])
+                                  userInfo: [NSLocalizedDescriptionKey: "Selected destination is not writable"])
                 }
             }
             output = try FileHandle(forUpdating: target)

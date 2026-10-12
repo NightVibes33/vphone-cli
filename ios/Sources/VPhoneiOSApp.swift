@@ -22,6 +22,7 @@ struct VPhoneiOSApp: App {
 struct VPhoneHome: View {
     @EnvironmentObject private var host: VPhoneHost
     @StateObject private var firmware = VPhoneFirmwareStager()
+    @AppStorage("vphone.firmware.storage.destination") private var firmwareStorage = "device"
     @State private var importingFirmwareFolder = false
     @State private var firmwareKind: VPhoneFirmwareStager.Kind = .ios
     @State private var importingFolder = false
@@ -30,6 +31,15 @@ struct VPhoneHome: View {
     @State private var shareGuestScreenshot = false
     @State private var screenshotURL: URL?
     @State private var showDiagnostics = false
+
+    private func startFirmwareDownload(_ kind: VPhoneFirmwareStager.Kind) {
+        firmwareKind = kind
+        if firmwareStorage == "device" {
+            firmware.download(kind, destination: .onDevice)
+        } else {
+            importingFirmwareFolder = true
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -94,13 +104,13 @@ struct VPhoneHome: View {
                             .disabled(host.state != .running && host.state != .stopUnconfirmed)
                     }
 
-                    GroupBox("External USB · direct disk") {
+                    GroupBox("VM disk · On My iPhone or USB") {
                         VStack(alignment: .leading, spacing: 8) {
-                            Button("Select VM folder on USB") { importingFolder = true }
+                            Button("Select existing VM folder in Files") { importingFolder = true }
                                 .buttonStyle(.bordered)
                                 .disabled(host.state == .running || host.state == .starting || host.state == .stopping || host.state == .stopUnconfirmed)
                             Text(host.storageStatus).font(.caption.monospaced()).foregroundStyle(.secondary)
-                            Text("Do not unplug the external drive until VPhone confirms VM stopped. The disk is never copied into the IPA.")
+                            Text("Choose a prepared VM from On My iPhone or external USB in Files. If using USB, do not unplug it until VPhone confirms VM stopped.")
                                 .font(.caption).foregroundStyle(.secondary)
                             Text("Select a prepared upstream vphone bundle with iBoot ROM, SEP ROM, NVRAM, Disk.img and config.plist. The real disk is read from USB in place.")
                                 .font(.caption)
@@ -109,37 +119,84 @@ struct VPhoneHome: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    GroupBox("iOS 27 firmware · stream to USB") {
+                    GroupBox("Firmware files · choose storage") {
                         VStack(alignment: .leading, spacing: 10) {
+                            Picker("Download destination", selection: $firmwareStorage) {
+                                Text("On My iPhone").tag("device")
+                                Text("USB drive").tag("usb")
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(firmware.isDownloading)
+
+                            Text(firmwareStorage == "device"
+                                 ? "Files → On My iPhone → VPhone → Firmware. The app downloads directly here."
+                                 : "Select the USB destination folder through Files when starting a download.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
                             Picker("iOS build", selection: $firmware.selection) {
                                 ForEach(firmware.pairings.indices, id: \.self) { i in
                                     Text(firmware.pairings[i].iosName).tag(i)
                                 }
                             }
                             .pickerStyle(.menu)
+                            .disabled(firmware.isDownloading)
+
                             HStack {
-                                Button("Save iOS IPSW") {
-                                    firmwareKind = .ios
-                                    importingFirmwareFolder = true
+                                Button("Download iOS IPSW") {
+                                    startFirmwareDownload(.ios)
                                 }
+                                .buttonStyle(.borderedProminent)
                                 .disabled(firmware.isDownloading || firmware.pairings.isEmpty)
-                                Button("Save cloudOS") {
-                                    firmwareKind = .cloudOS
-                                    importingFirmwareFolder = true
+
+                                Button("Download cloudOS") {
+                                    startFirmwareDownload(.cloudOS)
                                 }
+                                .buttonStyle(.bordered)
                                 .disabled(firmware.isDownloading || firmware.pairings.isEmpty)
+
                                 if firmware.isDownloading {
                                     Button("Cancel") { firmware.cancel() }
                                 }
                             }
+
                             if firmware.isDownloading {
                                 ProgressView(value: firmware.progress)
                             }
-                            Text(firmware.status).font(.caption.monospaced())
+                            Text(firmware.status)
+                                .font(.caption.monospaced())
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
-                            Text("Downloads the original upstream Apple firmware archives to USB without a full copy in iPhone storage. Firmware patching and DFU restore are separate operations.")
-                                .font(.caption).foregroundStyle(.secondary)
+
+                            HStack {
+                                Text("On-device downloads")
+                                    .font(.subheadline.bold())
+                                Spacer()
+                                Button("Refresh") { firmware.refreshOnDeviceFiles() }
+                                    .font(.caption)
+                            }
+                            if firmware.onDeviceFiles.isEmpty {
+                                Text("No files downloaded to this iPhone yet.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(firmware.onDeviceFiles, id: \.path) { file in
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "doc.zipper")
+                                        Text(file.lastPathComponent)
+                                            .font(.caption.monospaced())
+                                            .lineLimit(2)
+                                        Spacer(minLength: 4)
+                                        ShareLink(item: file) {
+                                            Image(systemName: "square.and.arrow.up")
+                                        }
+                                        .accessibilityLabel("Share \(file.lastPathComponent)")
+                                    }
+                                }
+                            }
+                            Text("Both destinations support resuming .partial downloads in the same folder. Files are not copied between USB and device automatically. Downloading firmware alone does not restore or boot the guest.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
 
@@ -233,7 +290,7 @@ struct VPhoneHome: View {
             .fileImporter(isPresented: $importingFirmwareFolder, allowedContentTypes: [.folder]) { result in
                 switch result {
                 case .success(let folder):
-                    firmware.download(firmwareKind, folder: folder)
+                    firmware.download(firmwareKind, destination: .chosenFolder(folder))
                 case .failure(_):
                     break
                 }

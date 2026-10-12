@@ -140,3 +140,30 @@ virtual device.
 - Allows app-owned Files URLs without requiring a security-scope grant when the files are already accessible.
 
 These changes improve the native host but do NOT establish authorized PV=3 virtualization on a stock iPhone or demonstrate iOS 27 SpringBoard boot.
+
+## Download destination: On My iPhone or USB drive
+
+The native VPhone firmware downloader now offers a persistent destination picker:
+
+- **On My iPhone:** stream iOS IPSWs and the matching cloudOS archive into the
+  app-owned `Documents/Firmware` directory, visible in Apple's Files app under
+  `On My iPhone → VPhone → Firmware` (file sharing is enabled in Info.plist).
+  The folder is created automatically; no Files picker is needed. The UI lists
+  downloaded and partial files and provides per-file sharing.
+- **USB drive:** choose any accessible writable folder on a connected external
+  USB-C volume in the Files picker when starting a download. Files are streamed
+  into that folder directly while its security scope remains open. No duplicate
+  firmware archive is intentionally staged in the iPhone app container.
+
+Both choices use the same serial streaming downloader, HTTP Range resume, a
+`.partial` filename until completion, and destination-scoped progress/status.
+A partial download can only resume from the **same destination folder**, never
+silently from the other device. The destination picker is disabled during active
+transfers. If the selected destination is full, disconnected, read-only, or
+revoked by its File Provider, the transfer reports failure and preserves the
+partial data where possible. Large downloads require sufficient free space on
+the selected destination and VPhone must remain foregrounded.
+
+Firmware download/staging is separate from the upstream privileged firmware
+patching, DFU restore and VM bundle creation. A full virtual iOS 27 boot is
+still unverified on normal SideStore-signed iPhone 16 hardware.
