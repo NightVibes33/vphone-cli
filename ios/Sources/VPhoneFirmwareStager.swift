@@ -1,6 +1,11 @@
 import Foundation
 import Combine
 
+protocol FirmwareTransferEngine: AnyObject {
+    func start() throws
+    func cancel()
+}
+
 /// Apple IPSW/cloudOS firmware streams directly into the destination chosen by
 /// the user: the app's Files-visible Documents/Firmware directory, or an
 /// external USB folder provided by the Files picker. No staging copy is made.
@@ -21,7 +26,11 @@ final class VPhoneFirmwareStager: ObservableObject {
     @Published private(set) var onDeviceFiles: [URL] = []
 
     let pairings = VPhoneFirmwareCatalog.pairings.filter { $0.iosName.hasPrefix("iOS 27") }
-    private var transfer: DirectFirmwareTransfer?
+    private var transfer: (any FirmwareTransferEngine)?
+    private var probeTask: Task<Void, Never>?
+    private var previousReceived: Int64 = 0
+    private var previousReportAt: TimeInterval = 0
+    @Published private(set) var transferMode = ""
 
     static var onDeviceFolder: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -63,64 +72,147 @@ final class VPhoneFirmwareStager: ObservableObject {
         case .onDevice:
             folder = Self.onDeviceFolder
             destinationLabel = "On My iPhone → VPhone → Firmware"
-        case .chosenFolder(let chosen):
-            folder = chosen
-            destinationLabel = "Selected Files folder: \(chosen.lastPathComponent)"
+        case .chosenFolder(let selected):
+            folder = selected
+            destinationLabel = "Selected Files folder: \(selected.lastPathComponent)"
         }
         do {
             if case .onDevice = destination {
-                try FileManager.default.createDirectory(
-                    at: folder, withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             }
-            // Each location has its own .partial download. Never resume from
-            // another storage location or silently copy the firmware between them.
-            destinationDescription = destinationLabel
-            let downloader = DirectFirmwareTransfer(
-                remote: remote, folder: folder, fileName: fileName,
-                report: { [weak self] bytes, expected in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        if expected > 0 {
-                            self.progress = min(1, Double(bytes) / Double(expected))
-                        }
-                        self.status = "\(destinationLabel): \(bytes / 1_048_576) MB received"
-                            + (expected > 0 ? " / \(expected / 1_048_576) MB" : "")
-                    }
-                },
-                finish: { [weak self] result in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        self.isDownloading = false
-                        self.transfer = nil
-                        self.refreshOnDeviceFiles()
-                        switch result {
-                        case .success(let url):
-                            self.progress = 1
-                            self.status = "Saved \(url.lastPathComponent) to \(destinationLabel). Guest restore remains required."
-                        case .failure(let error):
-                            self.status = "Download interrupted: \(error.localizedDescription). Partial file remains in \(destinationLabel) for resume."
-                        }
-                    }
-                })
-            transfer = downloader
-            isDownloading = true
-            status = "Streaming \(fileName) to \(destinationLabel). Keep VPhone foregrounded\(destinationLabel.hasPrefix("Selected") ? " and USB connected" : "")."
-            try downloader.start()
         } catch {
-            transfer = nil
-            isDownloading = false
-            status = "Cannot start download to \(destinationLabel): \(error.localizedDescription)"
+            status = "Cannot open \(destinationLabel): \(error.localizedDescription)"
+            return
+        }
+
+        destinationDescription = destinationLabel
+        isDownloading = true
+        progress = 0
+        transferMode = "Preparing download"
+        previousReceived = 0
+        previousReportAt = 0
+        status = "Checking Apple's CDN for faster downloading…"
+
+        // Existing serial .partial files continue with the legacy streaming
+        // implementation. Never pretend they are completed parallel ranges.
+        let folderScope = folder.startAccessingSecurityScopedResource()
+        let useParallel = kind == .ios &&
+            ParallelFirmwareTransfer.canResumeInParallel(folder: folder, fileName: fileName)
+        if folderScope { folder.stopAccessingSecurityScopedResource() }
+
+        probeTask = Task { [weak self] in
+            guard let self else { return }
+            var source: ParallelFirmwareTransfer.Source?
+            if useParallel {
+                do {
+                    var head = URLRequest(url: remote)
+                    head.httpMethod = "HEAD"
+                    head.timeoutInterval = 18
+                    head.cachePolicy = .reloadIgnoringLocalCacheData
+                    head.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                    let (_, response) = try await URLSession.shared.data(for: head)
+                    if let http = response as? HTTPURLResponse,
+                       http.statusCode == 200,
+                       let contentLength = http.value(forHTTPHeaderField: "Content-Length"),
+                       let length = Int64(contentLength),
+                       length > 128 * 1_048_576,
+                       http.value(forHTTPHeaderField: "Accept-Ranges")?
+                           .lowercased().contains("bytes") == true {
+                        source = .init(total: length,
+                                       eTag: http.value(forHTTPHeaderField: "ETag"),
+                                       lastModified: http.value(forHTTPHeaderField: "Last-Modified"))
+                    }
+                } catch {
+                    // A CDN without HEAD support still works in serial mode.
+                }
+            }
+            guard !Task.isCancelled else { return }
+            self.probeTask = nil
+
+            let scope = folder.startAccessingSecurityScopedResource()
+            let indexURL = folder.appendingPathComponent(fileName + ".ranges.json")
+            let hasCheckpoint = FileManager.default.fileExists(atPath: indexURL.path)
+            if scope { folder.stopAccessingSecurityScopedResource() }
+            if source == nil && hasCheckpoint {
+                self.isDownloading = false
+                self.status = "This folder contains a parallel download checkpoint, but Apple didn't confirm byte-range support. Keep the files and retry on a working network."
+                return
+            }
+
+            let report: (Int64, Int64) -> Void = { [weak self] bytes, expected in
+                Task { @MainActor in
+                    guard let self, self.isDownloading else { return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let seconds = max(0.2, now - self.previousReportAt)
+                    let delta = max(0, bytes - self.previousReceived)
+                    let speed = self.previousReportAt > 0 ?
+                        Double(delta) / 1_048_576 / seconds : 0
+                    self.previousReceived = bytes
+                    self.previousReportAt = now
+                    if expected > 0 { self.progress = min(1, Double(bytes) / Double(expected)) }
+                    let transferSpeed = String(format: "%.1f MB/s", speed)
+                    self.status = "\(self.transferMode) · \(bytes / 1_048_576)"
+                        + (expected > 0 ? " / \(expected / 1_048_576) MB" : " MB")
+                        + " · \(transferSpeed) · \(destinationLabel)"
+                }
+            }
+            let finish: (Result<URL, Error>) -> Void = { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isDownloading = false
+                    self.transfer = nil
+                    self.probeTask = nil
+                    self.refreshOnDeviceFiles()
+                    switch result {
+                    case .success(let url):
+                        self.progress = 1
+                        self.status = "Saved \(url.lastPathComponent) to \(destinationLabel). Firmware restore is still required."
+                    case .failure(let error):
+                        self.status = "Transfer stopped: \(error.localizedDescription). Completed data stays in \(destinationLabel) for resume."
+                    }
+                }
+            }
+
+            let downloader: any FirmwareTransferEngine
+            if let source {
+                self.transferMode = "Fast IPSW (4 connections)"
+                downloader = ParallelFirmwareTransfer(
+                    remote: remote, directory: folder, fileName: fileName,
+                    source: source, report: report, finish: finish)
+            } else {
+                self.transferMode = "Compatible download (1 connection)"
+                downloader = DirectFirmwareTransfer(
+                    remote: remote, folder: folder, fileName: fileName,
+                    report: report, finish: finish)
+            }
+            self.transfer = downloader
+            self.status = "\(self.transferMode): streaming directly to \(destinationLabel). Keep VPhone foregrounded."
+            do {
+                try downloader.start()
+            } catch {
+                self.isDownloading = false
+                self.transfer = nil
+                self.status = "Download failed to start: \(error.localizedDescription)"
+            }
         }
     }
 
     func cancel() {
-        transfer?.cancel()
+        if let probeTask {
+            probeTask.cancel()
+            self.probeTask = nil
+            isDownloading = false
+            status = "Download cancelled before transfer started."
+        } else {
+            transfer?.cancel()
+        }
     }
+
 }
 
 /// URLSessionDataDelegate callback queue is serial, so large archives are written
 /// incrementally in received chunks rather than via a full-RAM/data cache.
-private final class DirectFirmwareTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+private final class DirectFirmwareTransfer: NSObject, FirmwareTransferEngine, URLSessionDataDelegate, @unchecked Sendable {
     private let remote: URL
     private let folder: URL
     private let fileName: String
@@ -136,6 +228,7 @@ private final class DirectFirmwareTransfer: NSObject, URLSessionDataDelegate, @u
     private var totalExpected: Int64 = -1
     private var writingError: Error?
     private var responseValid = false
+    private var lastReportAt: TimeInterval = 0
 
     init(remote: URL, folder: URL, fileName: String,
          report: @escaping (Int64, Int64) -> Void,
@@ -239,7 +332,11 @@ private final class DirectFirmwareTransfer: NSObject, URLSessionDataDelegate, @u
         do {
             try output?.write(contentsOf: data)
             bytesWritten += Int64(data.count)
-            report(bytesWritten, totalExpected)
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastReportAt >= 0.45 {
+                lastReportAt = now
+                report(bytesWritten, totalExpected)
+            }
         } catch {
             writingError = error
             dataTask.cancel()
@@ -273,6 +370,7 @@ private final class DirectFirmwareTransfer: NSObject, URLSessionDataDelegate, @u
                               userInfo: [NSLocalizedDescriptionKey: "Destination already exists; file not overwritten"])
             }
             try FileManager.default.moveItem(at: partial, to: finished)
+            report(bytesWritten, bytesWritten)
             finish(.success(finished))
         } catch {
             if scopeAcquired { folder.stopAccessingSecurityScopedResource() }

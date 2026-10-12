@@ -194,7 +194,10 @@ struct VPhoneHome: View {
                                     }
                                 }
                             }
-                            Text("Both destinations support resuming .partial downloads in the same folder. Files are not copied between USB and device automatically. Downloading firmware alone does not restore or boot the guest.")
+                            Text("Fast IPSW mode uses up to 4 parallel Apple CDN connections when range downloads are supported. Finished 32 MB blocks are checkpointed for resume. CloudOS and unsupported servers use compatible single-stream mode.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("Both destinations resume in the same folder. Do not unplug USB during downloads. Downloading firmware does not restore or boot the guest.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

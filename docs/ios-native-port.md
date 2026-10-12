@@ -167,3 +167,24 @@ the selected destination and VPhone must remain foregrounded.
 Firmware download/staging is separate from the upstream privileged firmware
 patching, DFU restore and VM bundle creation. A full virtual iOS 27 boot is
 still unverified on normal SideStore-signed iPhone 16 hardware.
+
+
+## IPSW download acceleration
+
+The iOS IPSW downloader now checks Apple's CDN for byte range support and stable Content-Length.
+
+When supported, four HTTP Range requests download independent 32 MiB blocks into a SINGLE `.partial` image directly on the selected USB or On My iPhone storage.
+
+Exact HTTP 206 Content-Range responses are validated; unexpected, encoded or partial replies fail without promoting a corrupt IPSW.
+
+A small `.ranges.json` index records only fully received, fsynced blocks. Completed blocks survive cancellation and can resume without downloading them again.
+
+Legacy single-stream `.partial` downloads are resumed with the original single-stream downloader; they are never reinterpreted as segmented downloads.
+
+Once every block is complete, the single file is synced and renamed to `.ipsw` and the checkpoint is removed.
+
+CloudOS, small files, and CDN endpoints without advertised range support use the previous compatible one-connection path.
+
+Progress updates are throttled and instantaneous MB/s is shown. Actual throughput depends on CDN, Wi-Fi/cellular, USB, and iOS File Provider performance.
+
+The acceleration applies to firmware acquisition only; it does not implement iOS PV=3 hypervisor privileges or guest restore.
