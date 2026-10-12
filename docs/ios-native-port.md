@@ -287,7 +287,7 @@ The archive stays on USB as `VPhone-macOS-host-ROMs.zip`; the app creates no
 full-size copy in iPhone Documents, Caches or tmp. GitHub Actions artifacts
 expire; rerun the macOS workflow when needed.
 
-In Files on USB, extract the ROM artifact ZIP. The extracted directory
+The app automatically extracts the ROM ZIP on USB after downloading and verifies the ZIP CRC32 plus both ROM SHA-256 hashes. The extracted directory
 `VPhone-macOS-host-ROMs` must contain the two `.bin` files and `SHA256SUMS`.
 Select that same USB root when creating a bundle. The iOS app verifies the
 SHA-256 of both ROMs, locates both IPSWs in the USB root or USB `Firmware/`,
@@ -309,3 +309,13 @@ SpringBoard boot is not proven on a normal SideStore-signed iPhone 16.
 
 Be mindful of Apple's license restrictions when handling research ROM binaries
 and do not publish them as arbitrary publicly distributed release assets.
+
+
+## Download everything to USB — one-drive workflow
+
+- Select a writable USB-C folder once in **Everything to USB**. A sandbox bookmark preserves this chosen workspace; no second 32 GiB disk or firmware copy is staged on the iPhone.
+- Tap **Download everything and create 32 GB VM on USB**. Existing complete files on the USB drive are reused; iOS IPSW and cloudOS are downloaded sequentially to that same folder using existing resumable download engines.
+- The app downloads the latest macOS-runner ROM Actions artifact directly into the USB root (GitHub Actions: Read token required), automatically extracts only the four expected ZIP members, checks the ZIP CRC32 and verifies the SHA256SUMS of both research ROMs.
+- The app verifies the genuine ROMs, then invokes original upstream VPhoneBundleOps.create to create `USB/VMs/<bundle>/Disk.img` and associated config/SEP/boot ROM files. It checks that Disk.img reports **32 GiB logical size** and checks available USB space when Files reports it; some file providers lack accurate capacity reporting. `Disk.img` is sparse and contains no restored guest OS.
+- The USB storage root remains security-scoped while the iPhone app operates; a Files provider may still internally cache small operations. No full-size firmware archives or virtual disk images are intentionally staged in iPhone storage.
+- Completion means **all currently obtainable inputs and an empty 32 GiB VM disk are on USB**, NOT that a filled/bootable 32 GiB iOS image was downloaded. Firmware patching, guest DFU restore, custom firmware installation and a PV=3-authorized hypervisor are still required. Standard GitHub-hosted macOS machines cannot be assumed to run those privileged restore stages.

@@ -45,6 +45,15 @@ final class VPhoneBundleProvisioner: ObservableObject {
             // Only accept the exact two unmodified ROMs from the runner ZIP.
             try validateROMs(in: romFolder)
 
+            // A sparse image has 32 GiB logical capacity, not 32 GiB of
+            // downloaded OS content. Ensure USB has room for real disk writes
+            // before creating a potentially large exFAT/APFS image.
+            if let free = try? root.resourceValues(forKeys:
+                [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,
+               free > 0 && free < Int64(34) * 1024 * 1024 * 1024 {
+                throw ProvisionError.notEnoughStorage(free)
+            }
+
             let libraryRoot = root.appendingPathComponent("VMs", isDirectory: true)
             try fm.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
             let vmName = "vphone-iOS27-\(pairing.iosName.replacingOccurrences(of: " ", with: "-"))"
@@ -54,13 +63,23 @@ final class VPhoneBundleProvisioner: ObservableObject {
                 romSource: romFolder.appendingPathComponent("AVPBooter.vresearch1.bin"),
                 sepromSource: romFolder.appendingPathComponent("AVPSEPBooter.vresearch1.bin"))
             let bundle = try VPhoneBundleOps.create(spec, in: VPhoneLibrary(root: libraryRoot))
+            // Verify the physical disk file was created at the USB destination
+            // and that its logical size is exactly the requested 32 GiB.
+            let diskURL = bundle.url.appendingPathComponent("Disk.img")
+            let diskAttributes = try fm.attributesOfItem(atPath: diskURL.path)
+            let logicalBytes = (diskAttributes[.size] as? NSNumber)?.int64Value ?? -1
+            guard logicalBytes == Int64(32) * 1024 * 1024 * 1024 else {
+                try? fm.removeItem(at: bundle.url)
+                throw ProvisionError.diskSizeMismatch(logicalBytes)
+            }
+
             let stage = FirmwareStage(
                 format: 1,
                 status: "unrestored",
                 iphoneIPSW: "../../" + relativePath(iosSource, root: root),
                 cloudOSIPSW: "../../" + relativePath(cloudSource, root: root),
                 iosVersion: pairing.iosName, cloudOSVersion: pairing.cloudosName,
-                instructions: "Run upstream fw prepare/patch, DFU restore and CFW installation before booting.")
+                instructions: "The 32 GiB disk exists on USB but contains no installed iOS. Run upstream fw patch, DFU restore and custom firmware installation before booting.")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             do {
@@ -71,7 +90,7 @@ final class VPhoneBundleProvisioner: ObservableObject {
                 throw error
             }
             createdBundleURL = bundle.url
-            status = "USB bundle created: VMs/\(vmName). Uses original upstream config.plist and Disk.img. No firmware or VM data copied into the iPhone container. UNRESTORED: it still requires DFU restore and host VM permission before boot."
+            status = "USB layout verified: VMs/\(vmName)/Disk.img is 32 GiB logical size. Both IPSWs and both ROMs are on USB. Disk is EMPTY/UNRESTORED until firmware is installed; no 32 GiB OS image was downloaded. No iPhone storage copy."
             return bundle.url
         } catch {
             status = "USB VM creation failed: \(error.localizedDescription)"
@@ -136,8 +155,14 @@ final class VPhoneBundleProvisioner: ObservableObject {
         case missingChecksums
         case invalidROM(String)
         case checksumMismatch(String)
+        case notEnoughStorage(Int64)
+        case diskSizeMismatch(Int64)
         var errorDescription: String? {
             switch self {
+            case let .notEnoughStorage(free):
+                return "USB has about \(free / (1024 * 1024 * 1024)) GiB free. Reserve at least 34 GiB for the 32 GiB VM disk and future restore writes."
+            case let .diskSizeMismatch(size):
+                return "USB Disk.img logical size is \(size) bytes, not 32 GiB. Files provider may not support this image. No boot was attempted."
             case .invalidUSB:
                 return "Select an accessible external USB folder in Files."
             case .missingIPSW(let files):

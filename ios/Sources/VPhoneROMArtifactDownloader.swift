@@ -65,7 +65,7 @@ final class VPhoneROMArtifactDownloader: ObservableObject {
                             switch result {
                             case .success(let url):
                                 self.fraction = 1
-                                self.status = "Saved \(url.lastPathComponent) on USB. Extract the ZIP with Files on that SAME drive; then create the VM in that USB folder. No iPhone copy."
+                                self.status = "Downloaded and verified both host ROMs on USB, extracted in VPhone-macOS-host-ROMs/. Ready to create the 32 GiB VM disk on this drive. No iPhone copy."
                             case .failure(let error):
                                 self.status = "USB ROM download failed: \(error.localizedDescription)"
                             }
@@ -263,6 +263,10 @@ private final class VPhoneUSBArtifactStream: NSObject, URLSessionDataDelegate, U
                 throw VPhoneROMArtifactFailure.reason("Downloaded ROM artifact size mismatch")
             }
             try FileManager.default.moveItem(at: partial, to: complete)
+            // Extract the exact four ROM artifact entries onto the SAME USB
+            // folder, verifying ZIP CRC32 and SHA-256 before exposing them to
+            // the upstream VM bundle constructor.
+            try VPhoneROMArchive.extract(complete, toUSB: folder)
             end(.success(complete))
         } catch {
             end(.failure(error))

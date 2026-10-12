@@ -1,5 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+FOUNDATION_EXPORT BOOL VPhoneExtractROMArtifact(NSURL *archiveURL, NSURL *usbFolder, NSError * _Nullable * _Nullable error);
+@interface VPhoneROMArchive : NSObject
++ (BOOL)extract:(NSURL *)archive toUSB:(NSURL *)folder error:(NSError * _Nullable * _Nullable)error;
+@end
 NS_ASSUME_NONNULL_BEGIN
 @interface VPhoneNativeVM : NSObject
 + (NSString *)capabilitySummary;

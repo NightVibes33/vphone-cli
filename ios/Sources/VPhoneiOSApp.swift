@@ -24,6 +24,15 @@ struct VPhoneHome: View {
     @StateObject private var firmware = VPhoneFirmwareStager()
     @StateObject private var provisioner = VPhoneBundleProvisioner()
     @StateObject private var romDownload = VPhoneROMArtifactDownloader()
+    @StateObject private var workspace = VPhoneUSBWorkspace()
+    @State private var choosingUSBWorkspace = false
+    @State private var startAllWhenUSBChosen = false
+    @State private var usbSetupStatus = "Download both IPSWs and ROMs, then create the 32 GiB disk directly on USB."
+    @State private var setupPhase: USBSetupPhase = .idle
+
+    private enum USBSetupPhase {
+        case idle, ios, cloudOS, rom, disk, done, failed
+    }
     @State private var githubActionsToken = ""
     @State private var importingROMArtifactUSBFolder = false
     @State private var importingFirmwareFolder = false
@@ -38,15 +47,143 @@ struct VPhoneHome: View {
 
     private func startFirmwareDownload(_ kind: VPhoneFirmwareStager.Kind) {
         firmwareKind = kind
-        importingFirmwareFolder = true
+        if let root = workspace.root, workspace.checkUsable() {
+            firmware.download(kind, destination: .chosenFolder(root))
+        } else {
+            importingFirmwareFolder = true
+        }
     }
 
     private func prepareFromDownloadedFirmware(onUSB folder: URL) {
         guard firmware.pairings.indices.contains(firmware.selection) else { return }
         if provisioner.createBundle(onUSB: folder,
                                     pairing: firmware.pairings[firmware.selection]) != nil {
-            // The picker authorized the root; VPhone's VM lives under /VMs.
             host.selectUSB(.success(folder))
+        }
+    }
+
+    private func startAllUSBFiles() {
+        if workspace.root == nil {
+            startAllWhenUSBChosen = true
+            choosingUSBWorkspace = true
+        } else {
+            beginAllUSBFiles()
+        }
+    }
+
+    private func beginAllUSBFiles() {
+        guard !firmware.isDownloading && !romDownload.downloading,
+              firmware.pairings.indices.contains(firmware.selection),
+              workspace.checkUsable(), workspace.root != nil else {
+            usbSetupStatus = workspace.status
+            setupPhase = .failed
+            return
+        }
+        // All four outputs use one and the same selected USB scope. Nothing
+        // is downloaded to Documents, tmp, or a different Files provider URL.
+        setupPhase = .ios
+        advanceAllUSBFiles()
+    }
+
+    private func existingUSBFile(_ name: String, in root: URL) -> URL? {
+        [root, root.appendingPathComponent("Firmware", isDirectory: true)]
+            .map { $0.appendingPathComponent(name) }
+            .first { FileManager.default.isReadableFile(atPath: $0.path) }
+    }
+
+    private func advanceAllUSBFiles() {
+        guard let root = workspace.root, workspace.checkUsable(),
+              firmware.pairings.indices.contains(firmware.selection) else {
+            usbSetupStatus = "USB was disconnected or its folder access expired. Reconnect and choose it again."
+            setupPhase = .failed
+            return
+        }
+        let selected = firmware.pairings[firmware.selection]
+        switch setupPhase {
+        case .ios:
+            let name = "\(selected.iosName.replacingOccurrences(of: " ", with: "-"))-iPhone17,3.ipsw"
+            if existingUSBFile(name, in: root) != nil {
+                usbSetupStatus = "Existing iOS IPSW found on USB. Checking cloudOS…"
+                setupPhase = .cloudOS
+                advanceAllUSBFiles()
+            } else {
+                usbSetupStatus = "Step 1/4: iOS 27 IPSW → USB"
+                firmware.download(.ios, destination: .chosenFolder(root))
+            }
+        case .cloudOS:
+            let name = "\(selected.cloudosName.replacingOccurrences(of: " ", with: "-"))-cloudOS.ipsw"
+            if existingUSBFile(name, in: root) != nil {
+                usbSetupStatus = "Existing cloudOS IPSW found on USB. Checking research ROMs…"
+                setupPhase = .rom
+                advanceAllUSBFiles()
+            } else {
+                usbSetupStatus = "Step 2/4: cloudOS IPSW → USB"
+                firmware.download(.cloudOS, destination: .chosenFolder(root))
+            }
+        case .rom:
+            let romRoot = root.appendingPathComponent("VPhone-macOS-host-ROMs", isDirectory: true)
+            let bin = romRoot.appendingPathComponent("AVPBooter.vresearch1.bin")
+            let sep = romRoot.appendingPathComponent("AVPSEPBooter.vresearch1.bin")
+            if FileManager.default.isReadableFile(atPath: bin.path) &&
+               FileManager.default.isReadableFile(atPath: sep.path) &&
+               FileManager.default.isReadableFile(atPath: romRoot.appendingPathComponent("SHA256SUMS").path) {
+                usbSetupStatus = "ROM files found on USB. Verifying them during bundle creation…"
+                setupPhase = .disk
+                advanceAllUSBFiles()
+            } else {
+                let zip = root.appendingPathComponent("VPhone-macOS-host-ROMs.zip")
+                if FileManager.default.isReadableFile(atPath: zip.path) {
+                    do {
+                        try VPhoneROMArchive.extract(zip, toUSB: root)
+                        usbSetupStatus = "Extracted host ROM ZIP on USB."
+                        setupPhase = .disk
+                        advanceAllUSBFiles()
+                    } catch {
+                        usbSetupStatus = "USB ROM ZIP could not be extracted: \(error.localizedDescription)"
+                        setupPhase = .failed
+                    }
+                } else if githubActionsToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    usbSetupStatus = "Step 3/4 requires a GitHub Actions: Read token. Enter it in the ROM artifact section, then tap Download everything again. Firmware already on USB will be reused."
+                    setupPhase = .failed
+                } else {
+                    usbSetupStatus = "Step 3/4: macOS host ROMs → USB"
+                    romDownload.fetch(to: root, token: githubActionsToken)
+                }
+            }
+        case .disk:
+            usbSetupStatus = "Step 4/4: create 32 GiB VM Disk.img directly on USB…"
+            if let vm = provisioner.createBundle(onUSB: root, pairing: selected) {
+                host.selectUSB(.success(root))
+                usbSetupStatus = "USB complete: iOS IPSW, cloudOS IPSW, verified research ROMs, config.plist and 32 GiB Disk.img in \(vm.lastPathComponent). The disk is UNRESTORED: it is not yet a downloaded or bootable iOS installation."
+                setupPhase = .done
+            } else {
+                usbSetupStatus = provisioner.status
+                setupPhase = .failed
+            }
+        case .idle, .done, .failed:
+            break
+        }
+    }
+
+    private func firmwareStageChanged(_ active: Bool) {
+        guard !active, setupPhase == .ios || setupPhase == .cloudOS else { return }
+        if firmware.status.hasPrefix("Saved ") {
+            setupPhase = setupPhase == .ios ? .cloudOS : .rom
+            advanceAllUSBFiles()
+        } else {
+            usbSetupStatus = firmware.status
+            setupPhase = .failed
+        }
+    }
+
+    private func romStageChanged(_ active: Bool) {
+        guard !active, setupPhase == .rom else { return }
+        if romDownload.status.hasPrefix("Downloaded and verified") {
+            setupPhase = .disk
+            advanceAllUSBFiles()
+        } else {
+            usbSetupStatus = romDownload.status
+            setupPhase = .failed
         }
     }
 
@@ -111,6 +248,50 @@ struct VPhoneHome: View {
                         Button("Stop") { host.stop() }
                             .buttonStyle(.bordered)
                             .disabled(host.state != .running && host.state != .stopUnconfirmed)
+                    }
+
+                    GroupBox("Everything to USB · one drive") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Label(workspace.root?.lastPathComponent ?? "No USB drive chosen",
+                                      systemImage: "externaldrive")
+                                    .font(.footnote.weight(.semibold))
+                                Spacer()
+                                Button("Choose USB") {
+                                    choosingUSBWorkspace = true
+                                }
+                                .font(.caption)
+                                .disabled(firmware.isDownloading || romDownload.downloading ||
+                                          host.state == .running || host.state == .starting)
+                            }
+                            Text(workspace.status)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Button {
+                                startAllUSBFiles()
+                            } label: {
+                                Label("Download everything and create 32 GB VM on USB",
+                                      systemImage: "arrow.down.to.line.compact")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(firmware.isDownloading || romDownload.downloading ||
+                                      host.state == .running || host.state == .starting ||
+                                      host.state == .stopping)
+                            Text(usbSetupStatus)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(setupPhase == .failed ? Color.orange : Color.secondary)
+                                .textSelection(.enabled)
+                            if setupPhase == .ios || setupPhase == .cloudOS {
+                                ProgressView(value: firmware.progress)
+                            } else if setupPhase == .rom && romDownload.downloading {
+                                ProgressView(value: romDownload.fraction)
+                            }
+                            Text("Uses the selected USB drive for original iOS IPSW + cloudOS, macOS runner ROMs, and VMs/Disk.img (32 GiB logical capacity). No full-size files are staged on iPhone. The disk is empty until the upstream OS restore stages succeed.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     GroupBox("VM disk · USB storage") {
@@ -227,7 +408,8 @@ struct VPhoneHome: View {
 
                             HStack(spacing: 10) {
                                 Button("Download ROM artifact to USB") {
-                                    importingROMArtifactUSBFolder = true
+                                    if let root = workspace.root { romDownload.fetch(to: root, token: githubActionsToken) }
+                                    else { importingROMArtifactUSBFolder = true }
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .disabled(romDownload.downloading)
@@ -249,7 +431,7 @@ struct VPhoneHome: View {
                                  destination: URL(string: "https://github.com/NightVibes33/vphone-cli/actions/workflows/vphone-host-roms.yml")!)
                                 .font(.caption)
 
-                            Text("After downloading, use Files on the USB drive to extract VPhone-macOS-host-ROMs.zip. The app then finds both ROMs and SHA256SUMS inside the extracted folder on USB.")
+                            Text("The app now extracts and SHA-256 verifies the ROM archive directly on USB after download. No manual extraction or internal copy required.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -259,7 +441,8 @@ struct VPhoneHome: View {
                             Text("Uses the actual upstream VPhoneBundleOps.create, the iOS/cloudOS IPSWs and the verified ROMs already on the same USB drive. The VM disk, SEP files and config.plist are created on USB.")
                                 .font(.caption).foregroundStyle(.secondary)
                             Button("Create VM bundle on USB") {
-                                importingVMStorageFolder = true
+                                if let root = workspace.root { prepareFromDownloadedFirmware(onUSB: root) }
+                                else { importingVMStorageFolder = true }
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(firmware.isDownloading || firmware.pairings.isEmpty ||
@@ -361,6 +544,23 @@ struct VPhoneHome: View {
                     ShareSheet(items: [screenshotURL])
                 }
             }
+            .fileImporter(isPresented: $choosingUSBWorkspace, allowedContentTypes: [.folder]) { result in
+                if case let .success(folder) = result {
+                    do {
+                        try workspace.select(folder)
+                        if startAllWhenUSBChosen {
+                            startAllWhenUSBChosen = false
+                            beginAllUSBFiles()
+                        }
+                    } catch {
+                        startAllWhenUSBChosen = false
+                        usbSetupStatus = "Cannot use selected USB folder: \(error.localizedDescription)"
+                        setupPhase = .failed
+                    }
+                } else {
+                    startAllWhenUSBChosen = false
+                }
+            }
             .fileImporter(isPresented: $importingROMArtifactUSBFolder, allowedContentTypes: [.folder]) { result in
                 if case .success(let folder) = result {
                     romDownload.fetch(to: folder, token: githubActionsToken)
@@ -387,6 +587,12 @@ struct VPhoneHome: View {
             }
             .fileImporter(isPresented: $importingPairing, allowedContentTypes: [.data]) { result in
                 host.selectPairing(result)
+            }
+            .onChange(of: firmware.isDownloading) { _, active in
+                firmwareStageChanged(active)
+            }
+            .onChange(of: romDownload.downloading) { _, active in
+                romStageChanged(active)
             }
             .fullScreenCover(
                 isPresented: Binding(
