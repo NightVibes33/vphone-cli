@@ -94,8 +94,10 @@ The iOS code still cannot run upstream's Python/shell firmware preparation,
 privileged APFS CFW installer, host filesystem mounts, or macOS DFU restore.
 It consumes a PREPARED VPhone bundle with previously restored iOS 27 firmware.
 Importing a pairing plist and pinging LocalDevVPN do NOT authorize the PV=3
-VMM or automatically install vphoned. Guest IPA installation and full
-request-response operations are not yet wired to the iOS UI. Full VSOCK
+VMM or automatically install vphoned. Guest IPA installation now uses the real vphoned `file_mkdir` / `file_put`
+streaming / `ipa_install` / cleanup protocol, without loading the entire IPA
+in memory. Guest app list and launch requests are wired into the native iOS
+interface. The guest agent must already be running inside a booted VM. Full VSOCK
 functionality requires a VM that actually boots.
 No stock iPhone 16 running iOS 27 has been verified booting an iOS 27 guest
 with this IPA. A green unsigned IPA is only proof of compilation and packaging.
@@ -113,3 +115,14 @@ with this IPA. A green unsigned IPA is only proof of compilation and packaging.
   constitute successful guest restore. Use a prepared upstream VM bundle.
 * The host VM RAM is conservatively capped at half physical device memory,
   up to 4 GiB. The available memory might not be enough for an iOS 27 guest.
+
+
+## New guest application management
+
+When a genuine iOS guest is running and vphoned has replied to the version-1
+VSOCK handshake, the host can enumerate installed guest user applications,
+stream an IPA into a temporary guest path in 64 KiB chunks, request genuine
+IPA registration from the daemon, and launch guest bundle identifiers.
+Those controls stay inert before the guest connects. The host does not
+sideload IPA content into its own iOS app container as a substitute for the
+virtual device.

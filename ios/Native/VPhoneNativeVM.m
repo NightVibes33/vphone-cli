@@ -460,6 +460,10 @@ static id Get(id target, NSString *key) {
                     completion(@"Guest vphoned protocol v1 handshake unavailable");
                     return;
                 }
+                // Only the initial handshake should have an 8s socket read deadline.
+                // A running guest may otherwise remain idle for minutes.
+                struct timeval unlimited = {.tv_sec = 0, .tv_usec = 0};
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &unlimited, sizeof(unlimited));
                 self.guestControlReady = YES;
                 completion([NSString stringWithFormat:@"vphoned: %@; capabilities: %@",
                             hello[@"name"] ?: @"iPhone", hello[@"caps"] ?: @[]]);

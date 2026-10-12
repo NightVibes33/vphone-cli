@@ -43,7 +43,7 @@ final class VPhoneHost: ObservableObject {
         let id: String
         let name: String
         let version: String
-        init?(dictionary: [String: Any]) {
+        init?(dictionary: [AnyHashable: Any]) {
             guard let id = dictionary["bundle_id"] as? String, !id.isEmpty else { return nil }
             self.id = id
             self.name = dictionary["name"] as? String ?? id
