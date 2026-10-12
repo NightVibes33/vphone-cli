@@ -20,6 +20,23 @@ static id Call(id target, NSString *name, id argument) {
     if (!target || ![target respondsToSelector:sel]) return nil;
     return ((id (*)(id, SEL, id))objc_msgSend)(target, sel, argument);
 }
+// Private selectors that take C scalar arguments must never be called with
+// NSNumber objects: an object pointer would become a nonzero/true argument.
+static void CallBool(id target, NSString *name, BOOL value) {
+    SEL sel = NSSelectorFromString(name);
+    if (target && [target respondsToSelector:sel])
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(target, sel, value);
+}
+static void CallInteger(id target, NSString *name, NSInteger value) {
+    SEL sel = NSSelectorFromString(name);
+    if (target && [target respondsToSelector:sel])
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(target, sel, value);
+}
+static void CallDouble(id target, NSString *name, double value) {
+    SEL sel = NSSelectorFromString(name);
+    if (target && [target respondsToSelector:sel])
+        ((void (*)(id, SEL, double))objc_msgSend)(target, sel, value);
+}
 static BOOL Set(id target, NSString *key, id value) {
     if (!target || !value) return NO;
     @try { [target setValue:value forKey:key]; return YES; }
@@ -346,8 +363,8 @@ static id Get(id target, NSString *key) {
         id batterySource = Make(@"_VZMacSyntheticBatterySource");
         id battery = Make(@"_VZMacBatteryPowerSourceDeviceConfiguration");
         if (batterySource && battery) {
-            Call(batterySource, @"setCharge:", @(100.0));
-            Call(batterySource, @"setConnectivity:", @(1));
+            CallDouble(batterySource, @"setCharge:", 100.0);
+            CallInteger(batterySource, @"setConnectivity:", 1);
             Call(battery, @"setSource:", batterySource);
             if ([config respondsToSelector:NSSelectorFromString(@"_setPowerSourceDevices:")]) {
                 Call(config, @"_setPowerSourceDevices:", @[battery]);
@@ -386,9 +403,9 @@ static id Get(id target, NSString *key) {
     @try {
         id options = Make(@"VZMacOSVirtualMachineStartOptions");
         if (options && [self.virtualMachine respondsToSelector:sel]) {
-            Call(options, @"_setForceDFU:", @(NO));
-            Call(options, @"_setStopInIBootStage1:", @(NO));
-            Call(options, @"_setStopInIBootStage2:", @(NO));
+            CallBool(options, @"_setForceDFU:", NO);
+            CallBool(options, @"_setStopInIBootStage1:", NO);
+            CallBool(options, @"_setStopInIBootStage2:", NO);
             ((void (*)(id, SEL, id, id))objc_msgSend)(self.virtualMachine, sel, options, [completion copy]);
         } else {
             ((void (*)(id, SEL, id))objc_msgSend)(self.virtualMachine, plain, [completion copy]);
