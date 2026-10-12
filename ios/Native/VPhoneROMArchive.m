@@ -1,4 +1,5 @@
 #import "VPhoneNativeVM.h"
+#import "VPhoneNativeVM.h"
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <zlib.h>
