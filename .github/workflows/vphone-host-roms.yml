@@ -1,0 +1,62 @@
+name: Prepare VPhone host ROM artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ios27-native-integration]
+    paths:
+      - '.github/workflows/vphone-host-roms.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  host-roms:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Locate original Virtualization.framework research boot ROMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="/System/Library/Frameworks/Virtualization.framework"
+          RESOURCE="$ROOT/Versions/A/Resources"
+          OUT="$RUNNER_TEMP/vphone-host-roms"
+          mkdir -p "$OUT"
+          echo "macOS: $(sw_vers -productVersion)"
+          echo "Virtualization resources: $RESOURCE"
+          for FILE in AVPBooter.vresearch1.bin AVPSEPBooter.vresearch1.bin; do
+            SRC="$RESOURCE/$FILE"
+            if [[ ! -f "$SRC" ]]; then
+              echo "::error title=Research ROM unavailable::The hosted macOS runner does not contain $FILE in Virtualization.framework. A normal Apple IPSW does not include this host boot ROM."
+              if [[ -d "$RESOURCE" ]]; then
+                find "$RESOURCE" -maxdepth 1 -type f -print | sed 's|.*/||' | head -n 30
+              fi
+              exit 3
+            fi
+            if [[ ! -s "$SRC" ]]; then
+              echo "::error::$FILE exists but is empty"
+              exit 4
+            fi
+            cp "$SRC" "$OUT/$FILE"
+          done
+          cd "$OUT"
+          shasum -a 256 AVPBooter.vresearch1.bin AVPSEPBooter.vresearch1.bin > SHA256SUMS
+          {
+            printf '{"format":1,"origin":"apple-virtualization-framework","macOS":"%s","runner":"macos-15","files":[' "$(sw_vers -productVersion)"
+            printf '"AVPBooter.vresearch1.bin","AVPSEPBooter.vresearch1.bin"'
+            printf ']}\n'
+          } > manifest.json
+          ls -lh AVPBooter.vresearch1.bin AVPSEPBooter.vresearch1.bin manifest.json SHA256SUMS
+      - name: Upload originals as authenticated GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VPhone-macOS-host-ROMs
+          path: |
+            ${{ runner.temp }}/vphone-host-roms/AVPBooter.vresearch1.bin
+            ${{ runner.temp }}/vphone-host-roms/AVPSEPBooter.vresearch1.bin
+            ${{ runner.temp }}/vphone-host-roms/manifest.json
+            ${{ runner.temp }}/vphone-host-roms/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
