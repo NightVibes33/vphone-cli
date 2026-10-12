@@ -188,3 +188,30 @@ CloudOS, small files, and CDN endpoints without advertised range support use the
 Progress updates are throttled and instantaneous MB/s is shown. Actual throughput depends on CDN, Wi-Fi/cellular, USB, and iOS File Provider performance.
 
 The acceleration applies to firmware acquisition only; it does not implement iOS PV=3 hypervisor privileges or guest restore.
+
+
+## Full-screen real-guest boot display
+
+The Boot iOS button now validates the original VPhone VM folder, including
+Disk.img, NVRAM, iBoot/AVP ROM, SEP storage/ROM and upstream iOS restore metadata.
+The original restore metadata must identify **iOS 27.x**, and the disk must be
+nonempty. A raw downloaded IPSW does not pass validation.
+
+If the bundle passes preflight, the app attempts a **real** native PV=3 VM
+configuration. Only when VM creation succeeds does it open a full-screen
+Metal-backed guest display (including during VM start). The display presents
+only actual guest graphics frames obtained from VZGraphicsDisplay. Before
+frames are delivered, a transparent boot-status interface reports actual VM
+start/guest serial/vphoned activity; it does not fake the iOS Apple logo,
+lockscreen or SpringBoard.
+
+While running, a small ellipsis opens guest Home/Power controls, diagnostic
+logs and a confirmed Stop action. Closing the full-screen display is allowed
+only after the VM stops or fails. USB-backed guest disk access remains held
+until shutdown is confirmed. A failure to load private virtualization APIs
+returns an accurate error instead of a simulated iOS boot screen.
+
+**A valid restore directory is NOT proof of an iPhone-hosted VM capability.**
+Normal SideStore-signed iOS devices still have no verified authorization to
+run Apple's private PV=3 research guest VM, so a working SpringBoard guest
+has not been demonstrated on an iPhone 16.

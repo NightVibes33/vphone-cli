@@ -40,7 +40,24 @@ struct VPhoneVMPreflight {
         require(manifest.sepStorage, description: "SEP storage")
         require(manifest.romImages?.avpBooter, description: "iBoot/AVP ROM")
         require(manifest.romImages?.avpSEPBooter, description: "SEP ROM")
-        return .init(missing: missing, bundle: bundle,
-                     restore: VPhoneRestoreInfo.load(fromBundle: bundle))
+
+        // This app launches a real iOS 27 guest, not an arbitrary IPSW.
+        // A raw IPSW is not a prepared VM; require the restore provenance
+        // recorded by upstream VPhone or derived from its restore manifests.
+        let restored = VPhoneRestoreInfo.load(fromBundle: bundle)
+        if let restored {
+            if !restored.ios.version.hasPrefix("27.") {
+                missing.append("iOS 27 restore (found iOS \(restored.ios.version))")
+            }
+        } else {
+            missing.append("iOS 27 restore version metadata (restore-info.json)")
+        }
+
+        // Disk existence alone is insufficient for a valid restored guest.
+        if bundle.diskSizeBytes <= 0 {
+            missing.append("non-empty restored VM disk image")
+        }
+
+        return .init(missing: missing, bundle: bundle, restore: restored)
     }
 }

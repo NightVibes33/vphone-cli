@@ -23,6 +23,8 @@ final class VPhoneHost: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    @Published private(set) var guestFullscreenPresented = false
+    @Published private(set) var guestBootError: String?
     @Published private(set) var detail = "Choose an existing vphone VM bundle. No simulated boot state is used."
     let frames = GuestFrameStore()
     let usb = ExternalVMBundle()
@@ -97,6 +99,7 @@ final class VPhoneHost: ObservableObject {
     func start() {
         guard state != .starting && state != .running && state != .stopping && state != .stopUnconfirmed else { return }
         stopWhenStarted = false
+        guestBootError = nil
         guestBootStatus = "Preparing real guest boot chain"
         frames.clear()
         guard let bundleURL = usb.beginAccess() else {
@@ -126,13 +129,19 @@ final class VPhoneHost: ObservableObject {
         do {
             try native.prepare(withBundleURL: bundleURL)
         } catch {
+            // No full-screen presentation for an invalid VM/unsupported VM host.
             usb.endAccess()
             state = .failed
             detail = "Native VM creation failed: \(error.localizedDescription)"
+            guestBootError = detail
             record(detail)
             return
         }
 
+        // The original VPhone PV=3 VM has been created. Only now open the
+        // real, Metal-backed full-screen display; never present a fake iOS UI.
+        guestFullscreenPresented = true
+        guestBootStatus = "Native VM configured; starting iOS 27 guest"
         native.start { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
@@ -146,6 +155,8 @@ final class VPhoneHost: ObservableObject {
                         self.beginStopVerification(reason: "Guest start error: \(error.localizedDescription)")
                     }
                     self.detail = "Guest start failed: \(error.localizedDescription)"
+                    self.guestBootError = self.detail
+                    self.guestBootStatus = "Guest failed to start"
                 } else {
                     if self.stopWhenStarted {
                         self.state = .running
@@ -216,6 +227,20 @@ final class VPhoneHost: ObservableObject {
         state = .stopped
         detail = reason ?? "Virtual machine stopped; USB disk released"
         record(detail)
+    }
+
+    func closeGuestFullscreen() {
+        // Disallow dismissing while guest disk writes or VM shutdown may still
+        // be in progress. Exit must not silently detach external storage.
+        guard state == .idle || state == .failed || state == .stopped else {
+            record("Full-screen exit denied until guest VM shutdown is confirmed")
+            return
+        }
+        guestFullscreenPresented = false
+    }
+
+    var guestHasRealFrame: Bool {
+        frames.currentFrame() != nil
     }
 
     /// A normal iOS app cannot be assumed to keep a writable VM disk alive

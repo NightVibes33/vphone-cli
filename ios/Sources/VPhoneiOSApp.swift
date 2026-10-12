@@ -307,7 +307,15 @@ struct VPhoneHome: View {
             .fileImporter(isPresented: $importingPairing, allowedContentTypes: [.data]) { result in
                 host.selectPairing(result)
             }
-
+            .fullScreenCover(
+                isPresented: Binding(
+                    get: { host.guestFullscreenPresented },
+                    set: { if !$0 { host.closeGuestFullscreen() } }
+                )
+            ) {
+                VPhoneGuestFullscreen()
+                    .environmentObject(host)
+            }
         }
     }
 }
