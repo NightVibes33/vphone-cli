@@ -19,6 +19,8 @@ targets:
       - path: Native
       - path: ../sources/VPhoneCore/VPhoneVirtualMachineManifest.swift
       - path: ../sources/VPhoneCore/VPhoneBundle.swift
+      - path: ../sources/VPhoneCore/VPhoneLibrary.swift
+      - path: ../sources/VPhoneCore/VPhoneBundleOps.swift
       - path: ../sources/VPhoneCore/VPhoneRestoreInfo.swift
       - path: ../sources/VPhoneCore/VPhoneBundleReport.swift
       - path: ../sources/VPhoneCore/VPhoneFirmwareCatalog.swift

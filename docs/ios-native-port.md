@@ -236,3 +236,35 @@ Booting a real guest requires a prepared folder with `config.plist`,
 A Files LiveFiles/UserFSD path is a transient mount point, not evidence that
 an expected `config.plist` exists. The picker should report the missing VM
 setup rather than propagating a confusing Cocoa 260 exception.
+
+## Using the actual upstream VM bundle format (iPhone and USB)
+
+The new **Upstream VPhone VM bundle** section calls the **same**
+`VPhoneBundleOps.create` implementation as upstream `vphone-cli vm new`:
+it creates an actual `config.plist` using `VPhoneVirtualMachineManifest`,
+a sparse `Disk.img`, `SEPStorage`, and copies genuine
+`AVPBooter.vresearch1.bin` and `AVPSEPBooter.vresearch1.bin` ROMs.
+
+The app can use the iOS/cloudOS IPSWs it previously downloaded to **On My
+iPhone** or to a user-selected USB folder. It records their relative paths in
+`firmware-stage.json` without copying the full archives. The generated bundle
+goes in `VMs/<bundle-name>/` on the same chosen storage. After creation, it
+can be selected in the native VM browser from the root of that storage.
+
+**ROM requirement:** Upstream loads the two research ROMs from macOS
+`Virtualization.framework` resources, not from the Apple firmware IPSWs. The
+iOS app cannot extract those ROMs from downloaded IPSWs; the user must import
+the genuine ROM files through Files first.
+
+**Preparation is not restoration:** `VPhoneBundleOps.create` is only the
+first operation of upstream `vm create`. The next upstream stages are firmware
+extraction/patching, DFU restore, custom firmware installation, and first boot.
+These macOS research operations are **not** automatically executed by the
+iOS app, and an ordinary SideStore entitlement set cannot authorize the
+private PV=3 virtualization service. `firmware-stage.json` truthfully marks
+the bundle as `unrestored`; no `restore-info.json` is fabricated, and
+`Boot iOS` rejects an un-restored system.
+
+This change removes the unnecessary requirement to hand-assemble
+`config.plist` and `Disk.img` to get the same *initial* bundle layout
+as upstream, without falsely claiming the guest is ready to boot.

@@ -22,8 +22,12 @@ struct VPhoneiOSApp: App {
 struct VPhoneHome: View {
     @EnvironmentObject private var host: VPhoneHost
     @StateObject private var firmware = VPhoneFirmwareStager()
+    @StateObject private var provisioner = VPhoneBundleProvisioner()
     @AppStorage("vphone.firmware.storage.destination") private var firmwareStorage = "device"
     @State private var importingFirmwareFolder = false
+    @State private var importingVMStorageFolder = false
+    @State private var importingROM = false
+    @State private var selectedROM: VPhoneBundleProvisioner.ROM = .avpBooter
     @State private var firmwareKind: VPhoneFirmwareStager.Kind = .ios
     @State private var importingFolder = false
     @State private var importingPairing = false
@@ -38,6 +42,21 @@ struct VPhoneHome: View {
             firmware.download(kind, destination: .onDevice)
         } else {
             importingFirmwareFolder = true
+        }
+    }
+
+    private func prepareFromDownloadedFirmware(_ destination: VPhoneBundleProvisioner.Destination) {
+        guard firmware.pairings.indices.contains(firmware.selection) else { return }
+        if let bundle = provisioner.createBundle(
+            destination: destination, pairing: firmware.pairings[firmware.selection]) {
+            switch destination {
+            case .onDevice:
+                host.selectUSB(.success(bundle))
+            case .selectedFolder(let folder):
+                // Preserve the authorized USB root rather than passing an
+                // unauthorized descendant scope to the VM runtime.
+                host.selectUSB(.success(folder))
+            }
         }
     }
 
@@ -214,6 +233,55 @@ struct VPhoneHome: View {
                         }
                     }
 
+                    GroupBox("Upstream VPhone VM bundle") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Use your downloaded iOS IPSW and cloudOS to create the SAME VM layout as upstream VPhoneBundleOps.create: config.plist, sparse Disk.img, SEPStorage and real AVP boot ROMs.")
+                                .font(.caption).foregroundStyle(.secondary)
+
+                            Text("Required upstream host ROM files")
+                                .font(.subheadline.bold())
+                            HStack {
+                                Button("Import AVP ROM") {
+                                    selectedROM = .avpBooter
+                                    importingROM = true
+                                }
+                                .buttonStyle(.bordered)
+                                Button("Import SEP ROM") {
+                                    selectedROM = .avpSEPBooter
+                                    importingROM = true
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .font(.caption)
+                            ForEach(VPhoneBundleProvisioner.ROM.allCases, id: \.rawValue) { rom in
+                                Label(rom.rawValue,
+                                      systemImage: provisioner.readyROMs.contains(rom.rawValue)
+                                        ? "checkmark.circle.fill" : "circle.dashed")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Button("Create upstream VM bundle from downloads") {
+                                if firmwareStorage == "device" {
+                                    prepareFromDownloadedFirmware(.onDevice)
+                                } else {
+                                    importingVMStorageFolder = true
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(firmware.isDownloading || firmware.pairings.isEmpty)
+
+                            Text(provisioner.status)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .foregroundStyle(.secondary)
+
+                            Text("Bundle creation is stage 1 only. Upstream also patches firmware, restores the virtual disk through DFU and installs custom firmware. Those stages and private PV=3 virtualization permission remain unavailable on an ordinarily signed iPhone; this bundle is NOT bootable until restored.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
                     GroupBox("LocalDevVPN and pairing") {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -299,6 +367,14 @@ struct VPhoneHome: View {
             .sheet(isPresented: $shareGuestScreenshot) {
                 if let screenshotURL {
                     ShareSheet(items: [screenshotURL])
+                }
+            }
+            .fileImporter(isPresented: $importingROM, allowedContentTypes: [.data]) { result in
+                provisioner.importROM(result, as: selectedROM)
+            }
+            .fileImporter(isPresented: $importingVMStorageFolder, allowedContentTypes: [.folder]) { result in
+                if case let .success(folder) = result {
+                    prepareFromDownloadedFirmware(.selectedFolder(folder))
                 }
             }
             .fileImporter(isPresented: $importingFirmwareFolder, allowedContentTypes: [.folder]) { result in

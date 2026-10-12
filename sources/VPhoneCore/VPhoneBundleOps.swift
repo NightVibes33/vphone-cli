@@ -119,6 +119,7 @@ public enum VPhoneBundleOps {
         try FileManager.default.removeItem(at: url)
     }
 
+    #if os(macOS)
     // MARK: - Clone
 
     /// Clone a bundle with a fast APFS copy-on-write clone (fallback: recursive
@@ -218,4 +219,6 @@ public enum VPhoneBundleOps {
         try fm.moveItem(at: extracted, to: dst)
         return try VPhoneBundle.load(at: dst)
     }
+    #endif
+
 }

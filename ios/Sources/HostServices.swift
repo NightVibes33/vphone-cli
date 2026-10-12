@@ -173,11 +173,24 @@ final class ExternalVMBundle: ObservableObject {
         let folders = entries.filter {
             (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         }
-        let candidates = folders.filter {
+        let directCandidates = folders.filter {
             fm.isReadableFile(atPath: $0.appendingPathComponent("config.plist").path)
         }
+        // Portable upstream VM creation uses a VMs/ subdirectory, so inspect
+        // that single known level without recursively scanning an entire USB.
+        let libraryFolders = folders.filter { $0.lastPathComponent.lowercased() == "vms" }
+        let nestedCandidates = libraryFolders.flatMap { parent in
+            ((try? fm.contentsOfDirectory(at: parent,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles])) ?? [])
+                .filter { fm.isReadableFile(atPath: $0.appendingPathComponent("config.plist").path) }
+        }
+        let candidates = directCandidates + nestedCandidates
         if candidates.count == 1, let item = candidates.first {
-            return Candidate(url: item, relativePath: item.lastPathComponent)
+            let relative = item.path.hasPrefix(root.path + "/")
+                ? String(item.path.dropFirst(root.path.count + 1))
+                : item.lastPathComponent
+            return Candidate(url: item, relativePath: relative)
         }
         if candidates.count > 1 {
             throw VPhoneStorageError.multipleVMFolders(candidates.map(\.lastPathComponent))

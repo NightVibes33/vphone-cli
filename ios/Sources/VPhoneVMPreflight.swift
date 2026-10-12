@@ -45,6 +45,13 @@ struct VPhoneVMPreflight {
         // A raw IPSW is not a prepared VM; require the restore provenance
         // recorded by upstream VPhone or derived from its restore manifests.
         let restored = VPhoneRestoreInfo.load(fromBundle: bundle)
+        // Upstream vm new creates the directory structure, but only vm create
+        // installs the guest OS. A newly provisioned VPhone layout must not
+        // appear bootable just because it has config.plist and a sparse disk.
+        let sourceStage = url.appendingPathComponent("firmware-stage.json")
+        if fm.fileExists(atPath: sourceStage.path), restored == nil {
+            missing.append("DFU-restored iOS system (downloaded firmware is staged but not installed into Disk.img)")
+        }
         if let restored {
             if !restored.ios.version.hasPrefix("27.") {
                 missing.append("iOS 27 restore (found iOS \(restored.ios.version))")
