@@ -42,6 +42,7 @@ static id Get(id target, NSString *key) {
 @property (nonatomic, strong) NSPipe *serialInput;
 @property (nonatomic, strong) NSPipe *serialOutput;
 @property (nonatomic, strong) NSMutableString *serialBuffer;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *guestPending;
 @end
 
 @implementation VPhoneNativeVM
@@ -61,6 +62,7 @@ static id Get(id target, NSString *key) {
     self.guestSocketConnection = nil;
     self.guestControlFD = -1;
     self.guestControlReady = NO;
+    self.guestPending = [NSMutableDictionary dictionary];
     self.serialOutput.fileHandleForReading.readabilityHandler = nil;
     self.serialInput = nil;
     self.serialOutput = nil;
@@ -446,6 +448,8 @@ static id Get(id target, NSString *key) {
             self.guestSocketConnection = connection;
             struct timeval timeout = {.tv_sec = 8, .tv_usec = 0};
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            int noSigPipe = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 if (![self sendGuestMessage:@{@"v": @1, @"t": @"hello"}]) {
                     completion(@"Cannot send vphoned hello");
@@ -460,9 +464,21 @@ static id Get(id target, NSString *key) {
                 completion([NSString stringWithFormat:@"vphoned: %@; capabilities: %@",
                             hello[@"name"] ?: @"iPhone", hello[@"caps"] ?: @[]]);
                 while (self.guestControlReady && self.guestControlFD == fd) {
-                    if (![self receiveGuestMessage:fd]) break;
+                    NSDictionary *response = [self receiveGuestMessage:fd];
+                    if (!response) break;
+                    NSString *requestID = response[@"id"];
+                    void (^callback)(NSDictionary *) = nil;
+                    if ([requestID isKindOfClass:NSString.class]) {
+                        @synchronized (self.guestPending) {
+                            callback = self.guestPending[requestID];
+                            [self.guestPending removeObjectForKey:requestID];
+                        }
+                    }
+                    if (callback) callback(response);
                 }
                 self.guestControlReady = NO;
+                self.guestControlFD = -1;
+                [self failPendingRequests:@"vphoned disconnected"];
             });
         };
         ((void (*)(id, SEL, uint32_t, id))objc_msgSend)(
@@ -471,6 +487,201 @@ static id Get(id target, NSString *key) {
         completion(e.reason ?: @"Guest VSOCK connection failed");
     }
 }
+
+#pragma mark - Upstream vphoned request/reply protocol
+
+// Every request carries the same opaque ID echoed by vphoned. Replies are
+// delivered from the single VSOCK reader loop, avoiding competing socket reads.
+- (void)failPendingRequests:(NSString *)reason {
+    NSArray *callbacks = nil;
+    @synchronized(self.guestPending) {
+        callbacks = self.guestPending.allValues;
+        [self.guestPending removeAllObjects];
+    }
+    for (void (^cb)(NSDictionary *) in callbacks) {
+        cb(@{@"t": @"err", @"msg": reason});
+    }
+}
+
+- (void)requestGuest:(NSDictionary *)payload timeout:(NSTimeInterval)timeout
+          completion:(void (^)(NSDictionary *))completion {
+    if (!self.guestControlReady || self.guestControlFD < 0) {
+        completion(@{@"t": @"err", @"msg": @"vphoned is not connected"});
+        return;
+    }
+    NSString *ident = NSUUID.UUID.UUIDString;
+    NSMutableDictionary *message = [payload mutableCopy];
+    message[@"v"] = @1;
+    message[@"id"] = ident;
+    @synchronized(self.guestPending) {
+        self.guestPending[ident] = [completion copy];
+    }
+    if (![self sendGuestMessage:message]) {
+        void (^cb)(NSDictionary *) = nil;
+        @synchronized(self.guestPending) {
+            cb = self.guestPending[ident];
+            [self.guestPending removeObjectForKey:ident];
+        }
+        if (cb) cb(@{@"t": @"err", @"msg": @"Failed to send guest request"});
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        void (^cb)(NSDictionary *) = nil;
+        @synchronized(self.guestPending) {
+            cb = self.guestPending[ident];
+            [self.guestPending removeObjectForKey:ident];
+        }
+        if (cb) cb(@{@"t": @"err", @"msg": @"Guest request timed out"});
+    });
+}
+
+- (NSDictionary *)waitForGuest:(NSDictionary *)payload timeout:(NSTimeInterval)timeout {
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSDictionary *result = nil;
+    [self requestGuest:payload timeout:timeout completion:^(NSDictionary *message) {
+        result = message;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    long wait = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW,
+                                                                 (int64_t)((timeout + 1) * NSEC_PER_SEC)));
+    if (wait != 0) return @{@"t": @"err", @"msg": @"Response timeout"};
+    return result ?: @{@"t": @"err", @"msg": @"No guest reply"};
+}
+
+- (NSError *)errorForReply:(NSDictionary *)reply {
+    if (![reply[@"t"] isEqual:@"err"]) return nil;
+    NSString *message = [reply[@"msg"] isKindOfClass:NSString.class]
+        ? reply[@"msg"] : @"Guest returned an error";
+    return Failure(40, message);
+}
+
+- (void)listGuestAppsWithCompletion:(void (^)(NSArray<NSDictionary *> *, NSError *))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *reply = [self waitForGuest:@{@"t": @"app_list", @"filter": @"user"} timeout:30];
+        NSError *error = [self errorForReply:reply];
+        id apps = reply[@"apps"];
+        if (!error && ![apps isKindOfClass:NSArray.class]) {
+            error = Failure(41, @"Guest app_list response missing apps");
+        }
+        completion(error ? nil : apps, error);
+    });
+}
+
+- (void)launchGuestApp:(NSString *)bundleID completion:(void (^)(NSString *, NSError *))completion {
+    if (!bundleID.length) {
+        completion(nil, Failure(42, @"Missing guest app bundle identifier"));
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *reply = [self waitForGuest:@{@"t": @"app_launch", @"bundle_id": bundleID} timeout:30];
+        NSError *error = [self errorForReply:reply];
+        completion(error ? nil : [NSString stringWithFormat:@"Launched %@ (pid %@)",
+                                   bundleID, reply[@"pid"] ?: @"unknown"], error);
+    });
+}
+
+- (NSDictionary *)uploadGuestFile:(NSURL *)url toPath:(NSString *)destination
+                          progress:(void (^)(uint64_t, uint64_t))progress {
+    NSError *openError = nil;
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:url error:&openError];
+    if (!handle) return @{@"t": @"err", @"msg": openError.localizedDescription ?: @"Cannot read IPA"};
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:&openError];
+    uint64_t total = [attributes[NSFileSize] unsignedLongLongValue];
+    if (!total || total > (uint64_t)20 * 1024 * 1024 * 1024) {
+        [handle closeFile];
+        return @{@"t": @"err", @"msg": @"Invalid IPA size (maximum 20 GiB)"};
+    }
+
+    NSString *ident = NSUUID.UUID.UUIDString;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSDictionary *reply = nil;
+    @synchronized(self.guestPending) {
+        self.guestPending[ident] = [^(NSDictionary *r) {
+            reply = r;
+            dispatch_semaphore_signal(semaphore);
+        } copy];
+    }
+
+    BOOL success = YES;
+    int fd = self.guestControlFD;
+    @synchronized(self) {
+        if (!self.guestControlReady || fd < 0) {
+            success = NO;
+        } else {
+            NSDictionary *header = @{@"v": @1, @"t": @"file_put", @"id": ident,
+                                     @"path": destination, @"perm": @"644", @"size": @(total)};
+            NSData *json = [NSJSONSerialization dataWithJSONObject:header options:0 error:nil];
+            uint32_t length = htonl((uint32_t)json.length);
+            success = [self sendAll:&length count:4 fd:fd] &&
+                      [self sendAll:json.bytes count:json.length fd:fd];
+            uint64_t written = 0;
+            while (success && written < total) {
+                @autoreleasepool {
+                    NSData *chunk = [handle readDataOfLength:(NSUInteger)MIN((uint64_t)65536, total - written)];
+                    if (!chunk.length) {
+                        success = NO;
+                    } else {
+                        success = [self sendAll:chunk.bytes count:chunk.length fd:fd];
+                        written += chunk.length;
+                        if (success && progress) progress(written, total);
+                    }
+                }
+            }
+        }
+    }
+    [handle closeFile];
+    if (!success) {
+        void (^cb)(NSDictionary *) = nil;
+        @synchronized(self.guestPending) {
+            cb = self.guestPending[ident];
+            [self.guestPending removeObjectForKey:ident];
+        }
+        if (cb) cb(@{@"t": @"err", @"msg": @"Guest file transfer failed or USB disconnected"});
+    }
+    long wait = dispatch_semaphore_wait(semaphore,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(180 * NSEC_PER_SEC)));
+    if (wait != 0) {
+        @synchronized(self.guestPending) {
+            [self.guestPending removeObjectForKey:ident];
+        }
+        return @{@"t": @"err", @"msg": @"Guest file transfer reply timed out"};
+    }
+    return reply ?: @{@"t": @"err", @"msg": @"Guest file transfer failed"};
+}
+
+- (void)installGuestIPAAtURL:(NSURL *)url
+                   progress:(void (^)(uint64_t, uint64_t))progress
+                 completion:(void (^)(NSString *, NSError *))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL scope = [url startAccessingSecurityScopedResource];
+        @try {
+            if (!self.guestControlReady) {
+                completion(nil, Failure(43, @"Guest vphoned is not connected"));
+                return;
+            }
+            NSString *folder = @"/var/mobile/Documents/vphone-installs";
+            NSString *name = [NSString stringWithFormat:@"%@.ipa", NSUUID.UUID.UUIDString];
+            NSString *remotePath = [folder stringByAppendingPathComponent:name];
+            NSDictionary *mkdir = [self waitForGuest:@{@"t": @"file_mkdir", @"path": folder} timeout:30];
+            NSError *error = [self errorForReply:mkdir];
+            if (error) { completion(nil, error); return; }
+            NSDictionary *upload = [self uploadGuestFile:url toPath:remotePath progress:progress];
+            error = [self errorForReply:upload];
+            if (error) { completion(nil, error); return; }
+            NSDictionary *installed = [self waitForGuest:@{@"t": @"ipa_install",
+                @"path": remotePath, @"registration": @"User"} timeout:180];
+            error = [self errorForReply:installed];
+            // Keep cleanup best-effort, but do not turn a successful install into failure.
+            [self waitForGuest:@{@"t": @"file_delete", @"path": remotePath} timeout:30];
+            completion(error ? nil : (installed[@"msg"] ?: @"IPA installed inside guest"), error);
+        } @catch (NSException *exception) {
+            completion(nil, Failure(44, exception.reason ?: @"Guest installer failed"));
+        } @finally {
+            if (scope) [url stopAccessingSecurityScopedResource];
+        }
+    });
+}
+
 - (NSString *)serialLogSnapshot {
     @synchronized(self) {
         return [self.serialBuffer copy] ?: @"";

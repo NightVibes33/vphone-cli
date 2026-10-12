@@ -22,6 +22,7 @@ struct VPhoneHome: View {
     @State private var firmwareKind: VPhoneFirmwareStager.Kind = .ios
     @State private var importingFolder = false
     @State private var importingPairing = false
+    @State private var importingGuestIPA = false
     @State private var shareGuestScreenshot = false
     @State private var screenshotURL: URL?
     @State private var showDiagnostics = false
@@ -153,6 +154,41 @@ struct VPhoneHome: View {
                         }
                     }
 
+                    GroupBox("Apps inside the virtual iPhone") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Button("Install IPA in guest") { importingGuestIPA = true }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(host.state != .running || host.installingGuestIPA)
+                                Button("Refresh") { host.refreshGuestApps() }
+                                    .buttonStyle(.bordered)
+                                    .disabled(host.state != .running)
+                            }
+                            if host.installingGuestIPA {
+                                ProgressView(value: host.guestIPAProgress)
+                            }
+                            Text(host.guestIPAStatus).font(.caption).foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Text(host.guestAppsStatus).font(.caption).foregroundStyle(.secondary)
+                            ForEach(host.guestApps) { app in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(app.name).font(.footnote.bold())
+                                        Text("\(app.id) · \(app.version)")
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                    Spacer()
+                                    Button("Launch") { host.launchGuestApp(app) }
+                                        .buttonStyle(.bordered)
+                                }
+                            }
+                            Text("Uses upstream vphoned port 1337, file_put streaming and ipa_install. This manages a real booted guest only; no host apps are installed.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+
                     GroupBox("Host acceleration") {
                         VStack(alignment: .leading, spacing: 6) {
                             Label(host.capabilities.metal, systemImage: "cpu")
@@ -196,6 +232,9 @@ struct VPhoneHome: View {
             }
             .fileImporter(isPresented: $importingFolder, allowedContentTypes: [.folder]) { result in
                 host.selectUSB(result)
+            }
+            .fileImporter(isPresented: $importingGuestIPA, allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .data]) { result in
+                host.installGuestIPA(result)
             }
             .fileImporter(isPresented: $importingPairing, allowedContentTypes: [.data]) { result in
                 host.selectPairing(result)

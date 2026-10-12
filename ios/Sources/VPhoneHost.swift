@@ -33,6 +33,23 @@ final class VPhoneHost: ObservableObject {
     private var guestConnectTask: Task<Void, Never>?
     private var usbMonitorTask: Task<Void, Never>?
     @Published private(set) var storageStatus = "No disk selected"
+    @Published private(set) var guestApps: [VPhoneGuestApp] = []
+    @Published private(set) var guestAppsStatus = "Connect to a booted guest to manage apps"
+    @Published private(set) var guestIPAStatus = "Select an IPA after vphoned connects"
+    @Published private(set) var guestIPAProgress: Double = 0
+    @Published private(set) var installingGuestIPA = false
+
+    struct VPhoneGuestApp: Identifiable {
+        let id: String
+        let name: String
+        let version: String
+        init?(dictionary: [String: Any]) {
+            guard let id = dictionary["bundle_id"] as? String, !id.isEmpty else { return nil }
+            self.id = id
+            self.name = dictionary["name"] as? String ?? id
+            self.version = dictionary["version"] as? String ?? ""
+        }
+    }
     private var screenshotInFlight = false
     private var screenshotCount = 0
     @Published private(set) var guestFrameStatus = "No guest framebuffer yet"
@@ -129,6 +146,8 @@ final class VPhoneHost: ObservableObject {
         guestConnectTask?.cancel()
         guestConnectTask = nil
         guestControlStatus = "vphoned disconnected"
+        guestApps = []
+        guestAppsStatus = "Guest offline"
         native.stop { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
@@ -200,6 +219,75 @@ final class VPhoneHost: ObservableObject {
         }
     }
 
+    func refreshGuestApps() {
+        guard state == .running, guestControlStatus.hasPrefix("vphoned:") else {
+            guestAppsStatus = "Boot the guest and connect vphoned first"
+            return
+        }
+        guestAppsStatus = "Reading actual guest app list…"
+        native.listGuestApps { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.guestAppsStatus = "Guest app list failed: \(error.localizedDescription)"
+                    self.record(self.guestAppsStatus)
+                    return
+                }
+                self.guestApps = (result ?? []).compactMap { VPhoneGuestApp(dictionary: $0) }
+                self.guestAppsStatus = "\(self.guestApps.count) guest user apps"
+                self.record(self.guestAppsStatus)
+            }
+        }
+    }
+
+    func launchGuestApp(_ app: VPhoneGuestApp) {
+        guard state == .running, guestControlStatus.hasPrefix("vphoned:") else { return }
+        native.launchGuestApp(app.id) { [weak self] message, error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.guestAppsStatus = error?.localizedDescription ?? message ?? "Launch request completed"
+                self.record("Guest app launch: \(self.guestAppsStatus)")
+            }
+        }
+    }
+
+    func installGuestIPA(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            guard state == .running, guestControlStatus.hasPrefix("vphoned:") else {
+                guestIPAStatus = "A running guest with vphoned is required"
+                return
+            }
+            guard url.pathExtension.lowercased() == "ipa" else {
+                guestIPAStatus = "Selected file is not an IPA"
+                return
+            }
+            guard !installingGuestIPA else { return }
+            installingGuestIPA = true
+            guestIPAProgress = 0
+            guestIPAStatus = "Streaming \(url.lastPathComponent) into the actual iOS guest…"
+            native.installGuestIPA(at: url, progress: { [weak self] completed, total in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if total > 0 {
+                        self.guestIPAProgress = Double(completed) / Double(total)
+                    }
+                    self.guestIPAStatus = "Guest IPA upload: \(completed / 1_048_576) / \(total / 1_048_576) MB"
+                }
+            }, completion: { [weak self] message, error in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.installingGuestIPA = false
+                    self.guestIPAStatus = error?.localizedDescription ?? message ?? "Guest installer completed"
+                    self.record("Guest IPA installation: \(self.guestIPAStatus)")
+                    if error == nil { self.refreshGuestApps() }
+                }
+            })
+        } catch {
+            guestIPAStatus = "IPA import failed: \(error.localizedDescription)"
+        }
+    }
+
     func sendGuestTouch(phase: Int, x: Double, y: Double) {
         guard state == .running else { return }
         _ = native.sendTouch(withPhase: phase, x: x, y: y)
@@ -219,6 +307,7 @@ final class VPhoneHost: ObservableObject {
                 self.guestControlStatus = status
                 if status.hasPrefix("vphoned:") {
                     self.record("Real guest vphoned VSOCK handshake established")
+                    self.refreshGuestApps()
                     return
                 }
                 if attempt == 1 || attempt == 30 { self.record("Guest RPC: \(status)") }
@@ -288,6 +377,8 @@ final class VPhoneHost: ObservableObject {
         \(events.joined(separator: "\n"))
         Guest frames: \(screenshotCount)
         Guest RPC: \(guestControlStatus)
+        Guest apps: \(guestAppsStatus)
+        Guest installer: \(guestIPAStatus)
         Guest serial tail:
         \(native.serialLogSnapshot())
         External storage: \(storageStatus)
