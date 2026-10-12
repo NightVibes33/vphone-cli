@@ -12,9 +12,10 @@ WKWebView, off-device streaming, fake SpringBoard, or QEMU.
 
 * CPU: requests real guest CPU virtualization from Apple's PV=3 VM backend,
   capped at four cores for host responsiveness.
-* GPU: configures a VM graphics device and renders received real CVPixelBuffers
-  using a 60 FPS MetalKit / CoreImage Metal renderer. Guest framebuffer extraction
-  still requires privileged VM graphics access and is not hooked up.
+* GPU: configures a VM graphics device, uses the same private VZGraphicsDisplay
+  screenshot selector as upstream, and presents returned real CVPixelBuffers
+  with Metal. No fake SpringBoard frames are displayed. The rendering view
+  targets 60 FPS, but screenshot capture is throttled to 15 FPS.
 * JIT: checks local MAP_JIT memory-mapping availability. This check does not grant
   executable JIT permission or hypervisor access. No software CPU translator exists.
 * LocalDevVPN: checks a user-adjustable TCP endpoint for reachability. It does not
@@ -22,10 +23,22 @@ WKWebView, off-device streaming, fake SpringBoard, or QEMU.
 * Pairing file: user imports plist from Files, verified as a property list,
   stored in ThisDeviceOnly Keychain, never embedded in IPA, source, or logs.
   The full pairing protocol client is not implemented.
-* USB: imports the folder containing an existing prepared VM bundle, keeps its
-  security-scoped bookmark open during execution, and passes Disk.img directly
-  to the virtual disk API. No disk copy onto internal storage. A filesystem
-  provider may still deny write access or lose its grant on reconnection.
+* USB: imports an existing VM folder, keeps its security-scoped bookmark open,
+  and passes Disk.img in-place to VZ storage. Storage visibility is checked
+  while running; the VM is asked to stop if USB disappears. This cannot undo
+  corruption caused by physically unplugging a live guest disk. Some external
+  File Providers may cache files internally, deny random writes, or refuse
+  long-lived security-scoped access.
+* Firmware staging: the original VPhoneFirmwareCatalog's iOS 27 beta IPSW and
+  cloudOS Apple CDN URLs can be downloaded in streaming chunks directly to
+  user-selected USB storage. HTTP Range resumes a .partial file if supported.
+  It requires VPhone to remain foregrounded; downloading firmware is NOT a
+  replacement for Apple's DFU restore or the upstream binary patch pipeline.
+* Guest controls: consumer HID Home/Power/Volume controls use actual upstream
+  vphoned messages over virtio socket port 1337 after a protocol-v1 handshake.
+* Diagnostics: exports the real guest PL011 serial tail (up to ~600 KB), host
+  events, VM capability findings and frame counters; screenshot sharing exports
+  real received guest frames only.
 
 The required iOS 27 guest ROM, NVRAM, SEP, disk and config must already exist
 inside the selected folder. The IPA does NOT include or download a guest OS.
@@ -70,14 +83,33 @@ unplugging it. Pairing data remains encrypted at rest in this phone's Keychain.
 
 ## Guest display, compatibility and remaining gaps
 
-The iOS app invokes the same private guest screenshot selector used by the
-original VPhoneScreenRecorder against the actual virtual graphics device.
-It converts returned images to CVPixelBuffer and presents them through Metal.
-Without a real VM/display object, no frames are fabricated.
+The app now has the original manifest/restore-info reader, real attempted
+PV=3 VM creation, ROM/NVRAM/SEP/disk preflight, guest display capture, host
+Metal rendering, PL011 serial capture, vphoned VSOCK v1 handshake, touch and
+consumer-page HID injection, USB direct disk selection and unplug detection,
+and foreground-only IPSW/cloudOS streaming downloads to USB.
+Without a running authorized VM or display object, no frames are fabricated.
 
-The supported iOS code currently does not run upstream's Python/shell restore
-pipeline, host disk mounting, or macOS-only DFU restore. It consumes a prepared
-upstream VPhone bundle on USB and validates its original config.plist and
-boot/SEP images before attempting a real VM start. VPhone's guest-vphoned
-control protocol and touch/IPA installation still need an accessible VSOCK
-transport on iOS. No stock iPhone guest boot has been proven.
+The iOS code still cannot run upstream's Python/shell firmware preparation,
+privileged APFS CFW installer, host filesystem mounts, or macOS DFU restore.
+It consumes a PREPARED VPhone bundle with previously restored iOS 27 firmware.
+Importing a pairing plist and pinging LocalDevVPN do NOT authorize the PV=3
+VMM or automatically install vphoned. Guest IPA installation and full
+request-response operations are not yet wired to the iOS UI. Full VSOCK
+functionality requires a VM that actually boots.
+No stock iPhone 16 running iOS 27 has been verified booting an iOS 27 guest
+with this IPA. A green unsigned IPA is only proof of compilation and packaging.
+
+
+## iPhone limitations and interpretation
+
+* The absence of a hypervisor service is a HARD blocker; a JIT entitlement,
+  larger memory entitlement, VPN tunnel, pairing record, or Metal device
+  cannot replace VZVirtualMachine authorization.
+* SideStore may sign the IPA as a normal app but cannot grant Apple-private
+  PV=3 security-research entitlements. Boot must be tested on physical device
+  and only marked functional after an actual serial boot and SpringBoard frame.
+* The firmware stager only downloads Apple archives; importing them does not
+  constitute successful guest restore. Use a prepared upstream VM bundle.
+* The host VM RAM is conservatively capped at half physical device memory,
+  up to 4 GiB. The available memory might not be enough for an iOS 27 guest.
